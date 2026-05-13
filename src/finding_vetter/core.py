@@ -37,6 +37,12 @@ class ParsedReport:
     has_repro: bool = False
     attacker_mentions: list[str] = field(default_factory=list)
     impact_terms: list[str] = field(default_factory=list)
+    has_affected_or_tested_version: bool = False
+    has_attack_surface: bool = False
+    has_root_cause: bool = False
+    has_exploit_chain: bool = False
+    has_safe_side_effect: bool = False
+    has_fix_guidance: bool = False
 
 
 @dataclass
@@ -85,6 +91,30 @@ def parse_report(path: Path) -> ParsedReport:
     report.attacker_mentions = sorted(set(re.findall(r"(?i)\b(unauthenticated|remote|authenticated|low-privilege|workspace member|malicious website|prompt injection|admin|operator|local user)\b", text)))
     lower = text.lower()
     report.impact_terms = [t for t in RCE_TERMS + FILE_TERMS + SSRF_TERMS + AUTH_TERMS if t in lower]
+    report.has_affected_or_tested_version = bool(re.search(
+        r"(?im)^\s*(?:affected(?!\s+files?)|tested on|confirmed against|version|commit|current head|default configuration)\b",
+        text,
+    ))
+    report.has_attack_surface = bool(re.search(
+        r"(?i)\b(attack surface|entrypoint|entry point|reachable|default configuration|port \d+|victim action)\b",
+        text,
+    ))
+    report.has_root_cause = bool(re.search(
+        r"(?i)\b(root cause|bug is|vulnerability is|without checking|without auth|bounds check|validation|sanitize|source-to-sink|copies attacker-controlled)\b",
+        text,
+    ))
+    report.has_exploit_chain = bool(re.search(
+        r"(?i)\b(exploit chain|trigger|primitive|source[- ]to[- ]sink|->|leads to|reaches the sink)\b",
+        text,
+    ))
+    report.has_safe_side_effect = bool(re.search(
+        r"(?i)\b(expected result|actual result|safe side effect|created and then removed|cleanup|rm /tmp|test -f|id > /tmp|touch /tmp)\b",
+        text,
+    ))
+    report.has_fix_guidance = bool(re.search(
+        r"(?i)\b(fix|patch|mitigation|remediation|allowlist|denylist|bounds check|validate|sanitize|shell=false|authentication)\b",
+        text,
+    ))
     return report
 
 
@@ -161,7 +191,57 @@ def collect_repo_evidence(repo: Path, report: ParsedReport) -> tuple[list[str], 
     else:
         missing.append("No clear attacker position found, e.g. unauthenticated, low-privilege, malicious website, prompt injection.")
 
+    if _claims_high_impact_rce(report):
+        _add_madbugs_style_evidence(report, confirmed, missing)
+
     return confirmed, missing, agent_context, dangerous_hits
+
+
+def _claims_high_impact_rce(report: ParsedReport) -> bool:
+    lower = report.text.lower()
+    return ((report.severity or "").lower() in {"critical", "high"} or "critical" in lower) and any(
+        term in lower for term in RCE_TERMS
+    )
+
+
+def _add_madbugs_style_evidence(report: ParsedReport, confirmed: list[str], missing: list[str]) -> None:
+    checks = [
+        (
+            report.has_affected_or_tested_version,
+            "MADBugs-style affected/tested version or commit context is present.",
+            "Critical RCE needs affected/tested version or current-HEAD/default-config context.",
+        ),
+        (
+            report.has_attack_surface,
+            "Attack surface or reachable entrypoint context is present.",
+            "Critical RCE needs attack-surface/default-reachability context.",
+        ),
+        (
+            report.has_root_cause,
+            "Root-cause explanation is present.",
+            "Critical RCE needs root-cause/source-to-sink explanation, not only a dangerous sink.",
+        ),
+        (
+            report.has_exploit_chain,
+            "Exploit chain or trigger path is present.",
+            "Critical RCE needs a trigger/exploit chain from attacker input to impact.",
+        ),
+        (
+            report.has_safe_side_effect,
+            "PoC describes an expected result, cleanup, or safe side effect.",
+            "Critical RCE PoC should use a safe side effect and state expected result/cleanup.",
+        ),
+        (
+            report.has_fix_guidance,
+            "Fix, patch, or mitigation guidance is present.",
+            "Critical RCE report should include concise fix/mitigation guidance.",
+        ),
+    ]
+    for ok, good, bad in checks:
+        if ok:
+            confirmed.append(good)
+        else:
+            missing.append(bad)
 
 
 def generate_questions(report: ParsedReport, agent_context: bool, dangerous_hits: dict[str, list[str]]) -> list[str]:
@@ -183,7 +263,9 @@ def generate_questions(report: ParsedReport, agent_context: bool, dangerous_hits
         questions += [
             "Who can reach the command/code execution sink in default configuration?",
             "Is there authentication, authorization, user approval, or sandboxing before execution?",
-            "What safe command proves impact, and is cleanup documented?",
+            "What affected/tested version or commit proves this is current?",
+            "What is the root-cause source-to-sink chain from attacker input to execution?",
+            "What safe side effect proves impact, and is cleanup documented?",
         ]
     if any(term in lower for term in FILE_TERMS) or "file read/write" in dangerous_hits:
         questions += [
@@ -208,6 +290,7 @@ def decide_verdict(report: ParsedReport, missing: list[str], agent_context: bool
     missing_symbols = [m for m in missing if "symbol/string not found" in m or "endpoint/path string not found" in m]
     no_repro = any("No obvious PoC" in m for m in missing)
     no_attacker = any("No clear attacker" in m for m in missing)
+    missing_madbugs_rce_context = [m for m in missing if m.startswith("Critical RCE needs") or m.startswith("Critical RCE PoC")]
     lower = report.text.lower()
     claimed_critical_rce = (report.severity or "").lower() == "critical" or "critical" in lower and any(t in lower for t in RCE_TERMS)
 
@@ -217,6 +300,8 @@ def decide_verdict(report: ParsedReport, missing: list[str], agent_context: bool
         return "WEAK", "This appears to involve agent/tool functionality, but the report does not prove unauthorized boundary crossing.", "Rewrite as a potential boundary issue, then prove unauthorized invocation, approval bypass, sandbox escape, cross-user impact, or secret exposure."
     if no_attacker:
         return "WEAK", "The report does not define who the attacker is or how they reach the issue.", "Add a precise attacker model before claiming severity."
+    if claimed_critical_rce and missing_madbugs_rce_context:
+        return "NEEDS_WORK", "Critical RCE is plausible, but missing MADBugs-style context: affected/tested version, root cause, exploit chain, safe PoC evidence, or fix guidance.", "Add the affected/tested version, default attack surface, source-to-sink root cause, safe side-effect PoC with cleanup, and concise fix guidance."
     if no_repro:
         return "NEEDS_WORK", "The claim may be plausible, but it lacks a minimal PoC/repro.", "Add a safe repro against current HEAD and document expected vs actual result."
     if claimed_critical_rce and "auth" not in lower and "unauth" not in lower and "approval" not in lower:
@@ -287,6 +372,12 @@ def vet(repo: Path, report_path: Path, owner_repo: str | None = None) -> VetResu
             "has_repro": report.has_repro,
             "attacker_mentions": report.attacker_mentions,
             "impact_terms": report.impact_terms,
+            "has_affected_or_tested_version": report.has_affected_or_tested_version,
+            "has_attack_surface": report.has_attack_surface,
+            "has_root_cause": report.has_root_cause,
+            "has_exploit_chain": report.has_exploit_chain,
+            "has_safe_side_effect": report.has_safe_side_effect,
+            "has_fix_guidance": report.has_fix_guidance,
         },
     )
 

@@ -14,6 +14,7 @@ It is intentionally **not** a full static analyzer. It answers the practical pre
 - The report has a PoC/repro indicator.
 - Dangerous capability terms exist in the repo.
 - Agent/tool context is detected so intended functionality is not mislabeled as RCE.
+- Critical RCE reports include MADBugs-style proof context: affected/tested version, attack surface, root cause, exploit chain, safe PoC result/cleanup, and fix guidance.
 - Optional simple GitHub issue/PR duplicate search via `gh`.
 
 ## Install locally
@@ -65,6 +66,8 @@ Every report should answer:
 4. What dangerous action happens?
 5. What asset or user is harmed?
 6. What proof shows this works on current HEAD?
+
+For Critical/High RCE claims, `finding-vetter` also looks for the compact evidence pattern that showed up repeatedly in MADBugs writeups: affected/tested version, default attack surface, root-cause code path, attacker-input-to-impact chain, safe PoC side effect with cleanup, and concise fix guidance.
 
 ## Agent/tool API rule
 
