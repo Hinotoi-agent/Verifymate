@@ -25,6 +25,94 @@ FILE_TERMS = ["file read", "arbitrary file", "path traversal", "lfi", "directory
 SSRF_TERMS = ["ssrf", "server-side request", "metadata", "internal network"]
 AUTH_TERMS = ["auth bypass", "authorization", "authentication", "idor", "privilege"]
 
+REPORT_TEMPLATES: dict[str, str] = {
+    "general": """# Vulnerability report
+
+Severity: <Critical|High|Medium|Low>
+
+## Summary
+Describe the issue in one paragraph.
+
+## Affected / tested version
+- Repository commit or release:
+- Default configuration assumptions:
+
+## Attack surface
+Who can reach the vulnerable path and under what privileges?
+
+## Root cause
+Name the vulnerable file/symbol and explain why attacker input is trusted.
+
+## Reproduction
+Use a safe, minimal PoC. Include expected result, actual result, and cleanup.
+
+## Impact
+Describe the concrete asset, user, or security boundary affected.
+
+## Fix guidance
+Describe the smallest mitigation or validation rule that closes the issue.
+""",
+    "critical-rce": """# Critical RCE report
+
+Severity: Critical
+
+## Summary
+Explain the remote code execution claim in one paragraph.
+
+## Affected / tested version
+- Repository commit or release:
+- Default configuration assumptions:
+- Environment required to reproduce:
+
+## Attack surface
+Describe the remote entrypoint, auth/approval state, and attacker-controlled input.
+
+## Source-to-sink root cause
+Trace attacker input from the entrypoint to the execution sink with file/symbol names.
+
+## Exploit chain
+List the steps that transform attacker input into command/code execution.
+
+## Safe PoC
+Provide a non-destructive proof, expected side effect, observed result, and cleanup.
+
+## Impact
+Explain what code runs, under which OS/application identity, and what data or host boundary is exposed.
+
+## Fix guidance
+Describe the validation, authorization, sandboxing, or shell-avoidance change needed.
+""",
+    "agent-rce": """# Agent/tool RCE report
+
+Severity: Critical
+
+## Summary
+Explain why this is more than intended agent/tool functionality.
+
+## Affected / tested version
+- Repository commit or release:
+- Default configuration assumptions:
+
+## Agent/tool boundary
+Describe the agent API, tool, workflow, MCP server, browser bridge, or executor involved.
+
+## Approval / authorization analysis
+State who can trigger execution and whether auth, user approval, sandboxing, or workspace isolation is bypassed.
+
+## Source-to-sink root cause
+Trace attacker-controlled input from prompt/API/website/workspace content to the execution sink.
+
+## Safe PoC
+Use a harmless side effect such as writing a temp marker. Include expected result and cleanup.
+
+## Impact
+Describe host command execution, cross-user effect, secret exposure, or sandbox escape.
+
+## Fix guidance
+Describe how to restore the intended boundary: approval gating, origin/auth checks, sandboxing, allowlists, or path containment.
+""",
+}
+
 
 @dataclass
 class ParsedReport:
@@ -58,6 +146,15 @@ class VetResult:
 
     def to_json(self) -> str:
         return json.dumps(self.__dict__, indent=2, ensure_ascii=False)
+
+
+def render_report_template(kind: str = "general") -> str:
+    """Return a starter report template for a supported finding type."""
+    try:
+        return REPORT_TEMPLATES[kind].strip() + "\n"
+    except KeyError as exc:
+        allowed = ", ".join(sorted(REPORT_TEMPLATES))
+        raise ValueError(f"unknown template kind {kind!r}; choose one of: {allowed}") from exc
 
 
 def parse_report(path: Path) -> ParsedReport:

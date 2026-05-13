@@ -72,6 +72,24 @@ JSON output:
 verifymate finding.md --repo /path/to/repo --json
 ```
 
+Strict CI-friendly exit codes:
+
+```bash
+verifymate finding.md --repo /path/to/repo --strict
+```
+
+By default, completed vetting returns exit code `0` for all known verdicts so the CLI can be used interactively. With `--strict`, only `PASS` and `DUPLICATE_RISK` return `0`; `NEEDS_WORK`, `WEAK`, and `INVALID` return `2`.
+
+Generate starter report templates:
+
+```bash
+verifymate --template general --out finding.md
+verifymate --template critical-rce --out critical-rce.md
+verifymate --template agent-rce --out agent-rce.md
+```
+
+Templates include the evidence sections Verifymate expects, including affected/tested version, attack surface, source-to-sink root cause, safe PoC, impact, and fix guidance.
+
 The legacy `finding-vetter` console command is still available as an alias for compatibility.
 
 ## Verdicts
