@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "finding-vetter"
+name = "verifymate"
 version = "0.1.0"
-description = "Checklist-driven security finding reviewer for AI-generated vulnerability reports."
+description = "Repo-grounded verification assistant for vulnerability reports and AI-generated security findings."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-authors = [{name = "finding-vetter contributors"}]
-keywords = ["security", "vulnerability", "triage", "agent", "ai"]
+authors = [{name = "Verifymate contributors"}]
+keywords = ["security", "vulnerability", "triage", "agent", "ai", "verification"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Security",
@@ -19,15 +19,24 @@ classifiers = [
 
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/Hinotoi-agent/Verifymate"
+Repository = "https://github.com/Hinotoi-agent/Verifymate"
+Issues = "https://github.com/Hinotoi-agent/Verifymate/issues"
+
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
 [project.scripts]
+verifymate = "finding_vetter.cli:main"
 finding-vetter = "finding_vetter.cli:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/finding_vetter"]
 
 [tool.ruff]
 line-length = 100

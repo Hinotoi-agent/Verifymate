@@ -9,8 +9,8 @@ from .core import render_markdown, vet
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="finding-vetter",
-        description="Lightweight repo-grounded reviewer for AI-generated vulnerability reports.",
+        prog="verifymate",
+        description="Repo-grounded verification assistant for vulnerability reports and AI-generated security findings.",
     )
     parser.add_argument("report", type=Path, help="Markdown vulnerability report to vet")
     parser.add_argument("--repo", type=Path, required=True, help="Repository checkout to compare against")

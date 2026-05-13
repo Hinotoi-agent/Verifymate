@@ -384,7 +384,7 @@ def vet(repo: Path, report_path: Path, owner_repo: str | None = None) -> VetResu
 
 def render_markdown(result: VetResult) -> str:
     lines = [
-        "# Finding Vetter Result",
+        "# Verifymate Result",
         "",
         f"Verdict: **{result.verdict}**",
         "",

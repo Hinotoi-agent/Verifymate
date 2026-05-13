@@ -1,20 +1,44 @@
-# finding-vetter
+# Verifymate
 
-`finding-vetter` is a small checklist-driven CLI for reviewing AI-generated vulnerability reports against a real repository before filing them.
+<p align="center">
+  <img src="assets/verifymate-logo.svg" alt="Verifymate chess-knight verification logo" width="180">
+</p>
 
-It is intentionally **not** a full static analyzer. It answers the practical pre-submission question:
+**Verifymate** is a lightweight, repo-grounded CLI that helps security researchers and AI agents verify vulnerability reports before filing them.
+
+It is intentionally **not** a full static analyzer or an automatic vulnerability prover. Instead, it answers the practical pre-submission question:
 
 > Will this finding survive the first questions a maintainer will ask?
 
+Verifymate is useful when you have a draft security finding, AI-generated report, bug bounty note, or disclosure candidate and want a quick sanity check against the real repository.
+
+## Why Verifymate?
+
+Security reports often fail for preventable reasons:
+
+- the referenced file, symbol, endpoint, or code path does not exist anymore
+- the report describes a dangerous capability but not an attacker path
+- agent/tool functionality is mislabeled as RCE without proving a boundary bypass
+- a Critical RCE claim lacks a safe repro, tested version, or root-cause chain
+- similar issues are already public in GitHub issues or PRs
+
+Verifymate acts like a checklist-driven review partner: it compares the report to a checkout, highlights confirmed evidence, flags weak spots, and lists the questions a maintainer is likely to ask.
+
 ## What it checks
 
-- Referenced files exist on current checkout.
-- Referenced symbols/endpoints appear in the repo.
-- The report has an attacker model.
-- The report has a PoC/repro indicator.
+- Referenced files exist on the current checkout.
+- Referenced symbols, strings, and endpoints appear in the repo.
+- The report includes an attacker model.
+- The report includes a PoC/repro indicator.
 - Dangerous capability terms exist in the repo.
 - Agent/tool context is detected so intended functionality is not mislabeled as RCE.
-- Critical RCE reports include MADBugs-style proof context: affected/tested version, attack surface, root cause, exploit chain, safe PoC result/cleanup, and fix guidance.
+- Critical/High RCE reports include MADBugs-style proof context:
+  - affected/tested version or current commit
+  - default attack surface / reachability
+  - root cause and source-to-sink path
+  - exploit chain from attacker input to impact
+  - safe PoC side effect and cleanup
+  - concise fix or mitigation guidance
 - Optional simple GitHub issue/PR duplicate search via `gh`.
 
 ## Install locally
@@ -26,33 +50,35 @@ python -m pip install -e .
 ## Usage
 
 ```bash
-finding-vetter finding.md --repo /path/to/repo
+verifymate finding.md --repo /path/to/repo
 ```
 
-Try the bundled toy example:
+Try the bundled toy examples:
 
 ```bash
-finding-vetter examples/weak-agent-rce.md --repo examples/sample-agent-repo
-finding-vetter examples/strong-agent-rce.md --repo examples/sample-agent-repo
+verifymate examples/weak-agent-rce.md --repo examples/sample-agent-repo
+verifymate examples/strong-agent-rce.md --repo examples/sample-agent-repo
 ```
 
 Optional duplicate search:
 
 ```bash
-finding-vetter finding.md --repo /path/to/repo --github owner/repo
+verifymate finding.md --repo /path/to/repo --github owner/repo
 ```
 
 JSON output:
 
 ```bash
-finding-vetter finding.md --repo /path/to/repo --json
+verifymate finding.md --repo /path/to/repo --json
 ```
+
+The legacy `finding-vetter` console command is still available as an alias for compatibility.
 
 ## Verdicts
 
 - `PASS`: repo-grounded enough to file, though humans may still ask follow-ups.
-- `NEEDS_WORK`: plausible, but missing proof such as a minimal repro.
-- `WEAK`: dangerous code exists, but attacker path/impact/boundary is unclear.
+- `NEEDS_WORK`: plausible, but missing proof such as a minimal repro or RCE context.
+- `WEAK`: dangerous code exists, but attacker path, impact, or boundary is unclear.
 - `INVALID`: referenced evidence does not exist or is contradicted by the repo.
 - `DUPLICATE_RISK`: likely grounded, but similar public items may exist.
 
@@ -67,7 +93,7 @@ Every report should answer:
 5. What asset or user is harmed?
 6. What proof shows this works on current HEAD?
 
-For Critical/High RCE claims, `finding-vetter` also looks for the compact evidence pattern that showed up repeatedly in MADBugs writeups: affected/tested version, default attack surface, root-cause code path, attacker-input-to-impact chain, safe PoC side effect with cleanup, and concise fix guidance.
+For Critical/High RCE claims, Verifymate also looks for the compact evidence pattern that appears repeatedly in strong vulnerability writeups: affected/tested version, default attack surface, root-cause code path, attacker-input-to-impact chain, safe PoC side effect with cleanup, and concise fix guidance.
 
 ## Agent/tool API rule
 
@@ -85,7 +111,7 @@ A dangerous agent capability is not a vulnerability unless the report proves at 
 ## Example output
 
 ```markdown
-# Finding Vetter Result
+# Verifymate Result
 
 Verdict: **WEAK**
 
@@ -102,4 +128,4 @@ This appears to involve agent/tool functionality, but the report does not prove 
 
 ## Design principle
 
-Keep this as a repo-grounded report reviewer, not an automatic vulnerability prover.
+Keep Verifymate as a repo-grounded report reviewer, not an automatic vulnerability prover.
