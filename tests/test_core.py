@@ -196,3 +196,73 @@ def test_attacker_path_check_passes_for_entrypoint_input_sink_chain(tmp_path: Pa
 
     assert attacker_path["status"] == "pass"
     assert "attacker input, entrypoint, sink, and source-to-sink explanation" in attacker_path["detail"]
+
+
+def test_owasp_rationalization_maps_web_and_llm_categories(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "agent.py").write_text(
+        "from flask import Flask, request\n"
+        "app = Flask(__name__)\n"
+        "@app.post('/api/agent')\n"
+        "def agent_run():\n"
+        "    import subprocess\n"
+        "    prompt = request.json['prompt']\n"
+        "    return subprocess.run(prompt, shell=True)\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "finding.md"
+    report.write_text(
+        "# Prompt injection to tool command execution\n\n"
+        "Severity: High\n\n"
+        "Affected files: `agent.py`\n\n"
+        "Entrypoint: `POST /api/agent`\n\n"
+        "Attack surface: default web API reachable by remote unauthenticated users.\n\n"
+        "Attacker: remote unauthenticated user controls the prompt parameter and bypasses approval.\n\n"
+        "Root cause: source-to-sink path is request.json['prompt'] -> subprocess.run(prompt, shell=True).\n\n"
+        "PoC: curl /api/agent with expected result and cleanup.\n\n"
+        "Impact: prompt injection leads to remote command execution and privilege misuse.\n\n"
+        "Fix: require authentication, approval gating, and avoid shell=True.\n",
+        encoding="utf-8",
+    )
+
+    result = vet(repo, report)
+    web = next(check for check in result.checks if check["id"] == "owasp_top_10")
+    llm = next(check for check in result.checks if check["id"] == "owasp_llm_top_10")
+
+    assert web["status"] == "pass"
+    assert web["category"] == "owasp"
+    assert "A01:2021-Broken Access Control" in web["detail"]
+    assert "A03:2021-Injection" in web["detail"]
+    assert llm["status"] == "pass"
+    assert llm["category"] == "owasp_llm"
+    assert "LLM01:2025 Prompt Injection" in llm["detail"]
+    assert "LLM06:2025 Excessive Agency" in llm["detail"]
+
+    markdown = render_markdown(result)
+    assert "### OWASP rationalization" in markdown
+    assert "OWASP Top 10" in markdown
+    assert "OWASP Top 10 for LLM Applications" in markdown
+
+
+def test_owasp_rationalization_warns_when_no_category_fits(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# docs\n", encoding="utf-8")
+    report = tmp_path / "finding.md"
+    report.write_text(
+        "# Ambiguous bug\n\n"
+        "Affected files: `README.md`\n\n"
+        "Attacker: remote user.\n\n"
+        "PoC: curl /health\n",
+        encoding="utf-8",
+    )
+
+    result = vet(repo, report)
+    web = next(check for check in result.checks if check["id"] == "owasp_top_10")
+    llm = next(check for check in result.checks if check["id"] == "owasp_llm_top_10")
+
+    assert web["status"] == "warn"
+    assert "No strong OWASP Top 10 mapping" in web["detail"]
+    assert llm["status"] == "warn"
+    assert "No strong OWASP LLM Top 10 mapping" in llm["detail"]

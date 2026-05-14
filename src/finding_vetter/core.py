@@ -25,6 +25,95 @@ FILE_TERMS = ["file read", "arbitrary file", "path traversal", "lfi", "directory
 SSRF_TERMS = ["ssrf", "server-side request", "metadata", "internal network"]
 AUTH_TERMS = ["auth bypass", "authorization", "authentication", "idor", "privilege"]
 
+OWASP_TOP_10_RULES: list[tuple[str, tuple[str, ...]]] = [
+    (
+        "A01:2021-Broken Access Control",
+        (
+            "access control",
+            "auth bypass",
+            "authorization",
+            "unauthenticated",
+            "unauthorized",
+            "bypass",
+            "privilege",
+            "idor",
+            "cross-user",
+            "admin",
+        ),
+    ),
+    (
+        "A02:2021-Cryptographic Failures",
+        ("secret", "token", "credential", "password", "api key", "plaintext", "encrypt", "tls"),
+    ),
+    (
+        "A03:2021-Injection",
+        (
+            "injection",
+            "command execution",
+            "code execution",
+            "rce",
+            "subprocess",
+            "shell=true",
+            "sql",
+            "xss",
+            "template injection",
+        ),
+    ),
+    (
+        "A04:2021-Insecure Design",
+        ("insecure design", "boundary", "threat model", "approval", "sandbox", "default"),
+    ),
+    (
+        "A05:2021-Security Misconfiguration",
+        ("misconfiguration", "debug", "0.0.0.0", "cors", "default configuration"),
+    ),
+    (
+        "A06:2021-Vulnerable and Outdated Components",
+        ("dependency", "outdated", "cve", "vulnerable component"),
+    ),
+    (
+        "A07:2021-Identification and Authentication Failures",
+        ("authentication", "login", "session", "jwt", "password reset"),
+    ),
+    (
+        "A08:2021-Software and Data Integrity Failures",
+        ("plugin", "extension", "supply chain", "unsigned", "deserialization", "pickle"),
+    ),
+    (
+        "A09:2021-Security Logging and Monitoring Failures",
+        ("logging", "monitoring", "audit", "alert"),
+    ),
+    (
+        "A10:2021-Server-Side Request Forgery",
+        ("ssrf", "server-side request", "metadata", "internal network", "redirect"),
+    ),
+]
+
+OWASP_LLM_TOP_10_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("LLM01:2025 Prompt Injection", ("prompt injection", "prompt", "system prompt")),
+    (
+        "LLM02:2025 Sensitive Information Disclosure",
+        ("secret", "token", "credential", "password", "api key", "system prompt leakage"),
+    ),
+    ("LLM03:2025 Supply Chain", ("plugin", "extension", "model", "dependency", "supply chain")),
+    ("LLM04:2025 Data and Model Poisoning", ("poison", "training data", "fine-tune", "dataset")),
+    (
+        "LLM05:2025 Improper Output Handling",
+        ("output handling", "eval(", "exec(", "template", "sql", "command execution"),
+    ),
+    (
+        "LLM06:2025 Excessive Agency",
+        ("agent", "tool", "approval", "function_call", "subprocess", "shell=true", "executor"),
+    ),
+    ("LLM07:2025 System Prompt Leakage", ("system prompt", "prompt leakage", "leak prompt")),
+    (
+        "LLM08:2025 Vector and Embedding Weaknesses",
+        ("embedding", "vector", "rag", "retrieval", "index poisoning"),
+    ),
+    ("LLM09:2025 Misinformation", ("misinformation", "hallucination", "incorrect output")),
+    ("LLM10:2025 Unbounded Consumption", ("unbounded", "resource exhaustion", "denial of service", "dos")),
+]
+
 REPORT_TEMPLATES: dict[str, str] = {
     "general": """# Vulnerability report
 
@@ -449,6 +538,14 @@ def build_evidence_checklist(
     checks: list[dict[str, str]] = [
         repo_grounding,
         attacker_path,
+        _owasp_rationalization_check(report, dangerous_hits, OWASP_TOP_10_RULES, "owasp_top_10", "owasp"),
+        _owasp_rationalization_check(
+            report,
+            dangerous_hits,
+            OWASP_LLM_TOP_10_RULES,
+            "owasp_llm_top_10",
+            "owasp_llm",
+        ),
         _check(
             "attacker_model",
             "attacker_path",
@@ -631,6 +728,49 @@ def _attacker_path_check(report: ParsedReport, dangerous_hits: dict[str, list[st
     )
 
 
+def _owasp_rationalization_check(
+    report: ParsedReport,
+    dangerous_hits: dict[str, list[str]],
+    rules: list[tuple[str, tuple[str, ...]]],
+    check_id: str,
+    category: str,
+) -> dict[str, str]:
+    """Map report wording to OWASP categories without claiming a formal classification.
+
+    This is intentionally deterministic and evidence-light: it gives reviewers a
+    starting rationale for the closest OWASP Top 10 bucket while keeping the row
+    non-blocking because final taxonomy choice is a human disclosure decision.
+    """
+    lower = report.text.lower()
+    capability_terms = " ".join(
+        term.lower() for terms in dangerous_hits.values() for term in terms
+    )
+    haystack = f"{lower} {capability_terms} {' '.join(report.impact_terms).lower()}"
+    matches: list[str] = []
+    for label, keywords in rules:
+        matched_terms = [term for term in keywords if term in haystack]
+        if matched_terms:
+            matches.append(f"{label} ({', '.join(matched_terms[:3])})")
+    matches = _dedupe(matches)[:4]
+    if matches:
+        detail = _owasp_detail_prefix(check_id) + ": " + "; ".join(matches) + "."
+        return _check(check_id, category, "pass", detail, blocking=False)
+    framework = "OWASP LLM Top 10" if check_id == "owasp_llm_top_10" else "OWASP Top 10"
+    return _check(
+        check_id,
+        category,
+        "warn",
+        f"No strong {framework} mapping found; add taxonomy rationale or explain why none applies.",
+        blocking=False,
+    )
+
+
+def _owasp_detail_prefix(check_id: str) -> str:
+    if check_id == "owasp_llm_top_10":
+        return "OWASP Top 10 for LLM Applications candidates"
+    return "OWASP Top 10 candidates"
+
+
 def _has_attacker_controlled_input(text: str) -> bool:
     return bool(re.search(
         r"(?i)\b(attacker[- ]controlled|user[- ]controlled|controls?|input|parameter|param|payload|prompt|url|request|body|header|file|workspace content)\b",
@@ -774,6 +914,12 @@ def render_markdown(result: VetResult) -> str:
         for item in result.checks
         if item.get("category") == "attacker_path"
     ] or ["- No attacker-path checks generated."]
+    lines += ["", "### OWASP rationalization"]
+    lines += [
+        f"- **{item['status'].upper()}** `{item['id']}` — {item['detail']}"
+        for item in result.checks
+        if item.get("category") in {"owasp", "owasp_llm"}
+    ] or ["- No OWASP rationalization checks generated."]
     lines += ["", "## Evidence checklist", ""]
     lines += [
         f"- **{item['status'].upper()}** `{item['name']}` ({item.get('category', 'general')}) — {item['detail']}"
