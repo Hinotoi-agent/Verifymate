@@ -47,3 +47,25 @@ def test_cli_strict_returns_nonzero_for_needs_work(tmp_path: Path, capsys):
     assert "Verdict: **NEEDS_WORK**" in out
     assert "## Evidence checklist" in out
     assert "`repro`" in out
+
+
+def test_cli_profile_cve_request_emits_profile_check(tmp_path: Path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "api.py").write_text("def handler():\n    pass\n", encoding="utf-8")
+    report = tmp_path / "finding.md"
+    report.write_text(
+        "# Auth bypass\n\n"
+        "Affected files: `api.py`\n\n"
+        "Attacker: remote unauthenticated user.\n\n"
+        "PoC: curl /api.\n",
+        encoding="utf-8",
+    )
+
+    code = main([str(report), "--repo", str(repo), "--profile", "cve-request"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Profile: `cve-request`" in out
+    assert "Using `cve-request` validation profile." in out
+    assert "`profile_cve_duplicate_review`" in out
