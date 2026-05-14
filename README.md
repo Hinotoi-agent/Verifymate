@@ -22,7 +22,7 @@ Security reports often fail for preventable reasons:
 - a Critical RCE claim lacks a safe repro, tested version, or root-cause chain
 - similar issues are already public in GitHub issues or PRs
 
-Verifymate acts like a checklist-driven review partner: it compares the report to a checkout, highlights confirmed evidence, flags weak spots, and lists the questions a maintainer is likely to ask.
+Verifymate acts like a checklist-driven review partner: it compares the report to a checkout, highlights confirmed evidence with file/line snippets, flags weak spots, and lists the questions a maintainer is likely to ask.
 
 ## What it checks
 
@@ -31,6 +31,7 @@ Verifymate acts like a checklist-driven review partner: it compares the report t
 - The report includes an attacker model.
 - The report includes a PoC/repro indicator.
 - Dangerous capability terms exist in the repo.
+- Line-level evidence locations show where referenced files, symbols, endpoints, and risky capabilities were found.
 - Agent/tool context is detected so intended functionality is not mislabeled as RCE.
 - Critical/High RCE reports include MADBugs-style proof context:
   - affected/tested version or current commit
