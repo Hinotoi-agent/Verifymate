@@ -25,6 +25,95 @@ FILE_TERMS = ["file read", "arbitrary file", "path traversal", "lfi", "directory
 SSRF_TERMS = ["ssrf", "server-side request", "metadata", "internal network"]
 AUTH_TERMS = ["auth bypass", "authorization", "authentication", "idor", "privilege"]
 
+OWASP_TOP_10_RULES: list[tuple[str, tuple[str, ...]]] = [
+    (
+        "A01:2021-Broken Access Control",
+        (
+            "access control",
+            "auth bypass",
+            "authorization",
+            "unauthenticated",
+            "unauthorized",
+            "bypass",
+            "privilege",
+            "idor",
+            "cross-user",
+            "admin",
+        ),
+    ),
+    (
+        "A02:2021-Cryptographic Failures",
+        ("secret", "token", "credential", "password", "api key", "plaintext", "encrypt", "tls"),
+    ),
+    (
+        "A03:2021-Injection",
+        (
+            "injection",
+            "command execution",
+            "code execution",
+            "rce",
+            "subprocess",
+            "shell=true",
+            "sql",
+            "xss",
+            "template injection",
+        ),
+    ),
+    (
+        "A04:2021-Insecure Design",
+        ("insecure design", "boundary", "threat model", "approval", "sandbox", "default"),
+    ),
+    (
+        "A05:2021-Security Misconfiguration",
+        ("misconfiguration", "debug", "0.0.0.0", "cors", "default configuration"),
+    ),
+    (
+        "A06:2021-Vulnerable and Outdated Components",
+        ("dependency", "outdated", "cve", "vulnerable component"),
+    ),
+    (
+        "A07:2021-Identification and Authentication Failures",
+        ("authentication", "login", "session", "jwt", "password reset"),
+    ),
+    (
+        "A08:2021-Software and Data Integrity Failures",
+        ("plugin", "extension", "supply chain", "unsigned", "deserialization", "pickle"),
+    ),
+    (
+        "A09:2021-Security Logging and Monitoring Failures",
+        ("logging", "monitoring", "audit", "alert"),
+    ),
+    (
+        "A10:2021-Server-Side Request Forgery",
+        ("ssrf", "server-side request", "metadata", "internal network", "redirect"),
+    ),
+]
+
+OWASP_LLM_TOP_10_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("LLM01:2025 Prompt Injection", ("prompt injection", "prompt", "system prompt")),
+    (
+        "LLM02:2025 Sensitive Information Disclosure",
+        ("secret", "token", "credential", "password", "api key", "system prompt leakage"),
+    ),
+    ("LLM03:2025 Supply Chain", ("plugin", "extension", "model", "dependency", "supply chain")),
+    ("LLM04:2025 Data and Model Poisoning", ("poison", "training data", "fine-tune", "dataset")),
+    (
+        "LLM05:2025 Improper Output Handling",
+        ("output handling", "eval(", "exec(", "template", "sql", "command execution"),
+    ),
+    (
+        "LLM06:2025 Excessive Agency",
+        ("agent", "tool", "approval", "function_call", "subprocess", "shell=true", "executor"),
+    ),
+    ("LLM07:2025 System Prompt Leakage", ("system prompt", "prompt leakage", "leak prompt")),
+    (
+        "LLM08:2025 Vector and Embedding Weaknesses",
+        ("embedding", "vector", "rag", "retrieval", "index poisoning"),
+    ),
+    ("LLM09:2025 Misinformation", ("misinformation", "hallucination", "incorrect output")),
+    ("LLM10:2025 Unbounded Consumption", ("unbounded", "resource exhaustion", "denial of service", "dos")),
+]
+
 REPORT_TEMPLATES: dict[str, str] = {
     "general": """# Vulnerability report
 
@@ -178,7 +267,13 @@ def parse_report(path: Path) -> ParsedReport:
     report.files.extend(_extract_paths(text))
     report.files = sorted(set(_clean_file_ref(p) for p in report.files if _looks_like_path(p)))
 
-    report.symbols = sorted(set(re.findall(r"`([A-Za-z_][\w:.]{2,})\s*(?:\(\))?`", text)))
+    report.symbols = sorted(
+        set(
+            symbol
+            for symbol in re.findall(r"`([A-Za-z_][\w:.]{2,})\s*(?:\(\))?`", text)
+            if not _looks_like_path(symbol)
+        )
+    )
     endpoint_candidates = re.findall(r"`?((?:(?:GET|POST|PUT|PATCH|DELETE)\s+)?/[A-Za-z0-9_./{}:\-]+)`?", text)
     report.endpoints = sorted(set(
         e for e in endpoint_candidates
@@ -203,7 +298,7 @@ def parse_report(path: Path) -> ParsedReport:
         text,
     ))
     report.has_exploit_chain = bool(re.search(
-        r"(?i)\b(exploit chain|trigger|primitive|source[- ]to[- ]sink|->|leads to|reaches the sink)\b",
+        r"(?i)\b(exploit chain|trigger|primitive|source[- ]to[- ]sink|->|leads to|reaches the sink|flows? to|reaches?)\b",
         text,
     ))
     report.has_safe_side_effect = bool(re.search(
@@ -422,47 +517,75 @@ def build_evidence_checklist(
     report: ParsedReport,
     missing: list[str],
     agent_context: bool,
+    evidence_locations: list[dict[str, str]] | None = None,
+    dangerous_hits: dict[str, list[str]] | None = None,
 ) -> list[dict[str, str]]:
-    """Return a compact pass/warn/fail checklist for UI and JSON consumers.
+    """Return deterministic checker gates for UI and JSON consumers.
 
     The prose `confirmed` / `missing` lists are useful for humans, but they are hard to
-    scan and hard to gate in automation. This checklist keeps the existing verdicts
-    stable while exposing the main evidence dimensions as structured records.
+    scan and hard to gate in automation. These checks keep Verifymate as a checker:
+    each row has a stable id, category, pass/warn/fail status, blocking flag, detail,
+    and line-backed evidence summary where available.
     """
+    evidence_locations = evidence_locations or []
+    dangerous_hits = dangerous_hits or {}
     missing_files = [m for m in missing if "file not found" in m]
     missing_repo_refs = [
         m for m in missing if "symbol/string not found" in m or "endpoint/path string not found" in m
     ]
+    repo_grounding = _repo_grounding_check(missing_files, missing_repo_refs, evidence_locations)
+    attacker_path = _attacker_path_check(report, dangerous_hits)
     checks: list[dict[str, str]] = [
-        _check(
-            "repo_refs",
-            "fail" if missing_files else "warn" if missing_repo_refs else "pass",
-            "Referenced files/symbols/endpoints resolve on the checked-out repository."
-            if not missing_files and not missing_repo_refs
-            else _join_check_detail(missing_files + missing_repo_refs),
+        repo_grounding,
+        attacker_path,
+        _owasp_rationalization_check(report, dangerous_hits, OWASP_TOP_10_RULES, "owasp_top_10", "owasp"),
+        _owasp_rationalization_check(
+            report,
+            dangerous_hits,
+            OWASP_LLM_TOP_10_RULES,
+            "owasp_llm_top_10",
+            "owasp_llm",
         ),
         _check(
             "attacker_model",
+            "attacker_path",
             "pass" if report.attacker_mentions else "fail",
             "Attacker position terms found: " + ", ".join(report.attacker_mentions)
             if report.attacker_mentions
             else "Report should state who can trigger the issue and with what privileges.",
+            blocking=True,
         ),
         _check(
             "repro",
+            "proof",
             "pass" if report.has_repro else "fail",
             "PoC/repro indicator found."
             if report.has_repro
             else "Report should include a safe minimal reproduction or proof command.",
+            blocking=True,
         ),
         _check(
+            "impact",
             "impact",
             "pass" if report.impact_terms else "warn",
             "Impact terms found: " + ", ".join(report.impact_terms)
             if report.impact_terms
             else "Impact should name the affected asset, boundary, or capability.",
+            blocking=False,
         ),
     ]
+
+    # Compatibility row for consumers that already key on repo_refs.
+    checks.append(
+        _check(
+            "repo_refs",
+            "repo_grounding",
+            repo_grounding["status"],
+            repo_grounding["detail"],
+            blocking=True,
+            evidence=repo_grounding["evidence"],
+        )
+    )
 
     if agent_context:
         lower = report.text.lower()
@@ -482,10 +605,12 @@ def build_evidence_checklist(
         checks.append(
             _check(
                 "agent_boundary",
+                "boundary",
                 "pass" if has_boundary else "warn",
                 "Agent/tool boundary language is present."
                 if has_boundary
                 else "Agent/tool repos need an explicit unauthorized invocation, approval-bypass, sandbox-escape, cross-user, or secret-exposure boundary.",
+                blocking=False,
             )
         )
 
@@ -494,36 +619,42 @@ def build_evidence_checklist(
             [
                 _boolean_check(
                     "affected_version",
+                    "repo_grounding",
                     report.has_affected_or_tested_version,
                     "Affected/tested version or commit context is present.",
                     "Add affected/tested version, commit, or current-HEAD/default-config context.",
                 ),
                 _boolean_check(
                     "attack_surface",
+                    "attacker_path",
                     report.has_attack_surface,
                     "Attack surface or reachable entrypoint context is present.",
                     "Add default reachability, entrypoint, auth, and exposure context.",
                 ),
                 _boolean_check(
                     "root_cause",
+                    "attacker_path",
                     report.has_root_cause,
                     "Root-cause/source-to-sink explanation is present.",
                     "Trace attacker input from entrypoint to vulnerable sink.",
                 ),
                 _boolean_check(
                     "exploit_chain",
+                    "attacker_path",
                     report.has_exploit_chain,
                     "Exploit chain or trigger path is present.",
                     "List the steps from attacker input to impact.",
                 ),
                 _boolean_check(
                     "safe_poc",
+                    "proof",
                     report.has_safe_side_effect,
                     "PoC describes expected result, cleanup, or safe side effect.",
                     "Use a harmless side effect and document expected result plus cleanup.",
                 ),
                 _boolean_check(
                     "fix_guidance",
+                    "maintainer_readiness",
                     report.has_fix_guidance,
                     "Fix, patch, or mitigation guidance is present.",
                     "Add concise mitigation guidance for the maintainer.",
@@ -534,12 +665,141 @@ def build_evidence_checklist(
     return checks
 
 
-def _check(name: str, status: str, detail: str) -> dict[str, str]:
-    return {"name": name, "status": status, "detail": detail}
+def _repo_grounding_check(
+    missing_files: list[str],
+    missing_repo_refs: list[str],
+    evidence_locations: list[dict[str, str]],
+) -> dict[str, str]:
+    grounding_kinds = {"file", "symbol", "endpoint"} | set(DANGEROUS_TERMS)
+    grounding_locations = [item for item in evidence_locations if item["kind"] in grounding_kinds]
+    grounded_categories = set()
+    for item in grounding_locations:
+        if item["kind"] in DANGEROUS_TERMS:
+            grounded_categories.add("capability")
+        else:
+            grounded_categories.add(item["kind"])
+    status = "fail" if missing_files else "warn" if missing_repo_refs else "pass"
+    if missing_files or missing_repo_refs:
+        detail = _join_check_detail(missing_files + missing_repo_refs)
+    elif grounding_locations:
+        detail = (
+            f"Repo grounding is line-backed for {len(grounded_categories)}/{len(grounded_categories)} "
+            "referenced files/symbols/endpoints/capabilities."
+        )
+    else:
+        status = "warn"
+        detail = "No line-backed repo references were extracted from the report."
+    evidence = ", ".join(f"{item['file']}:{item['line']}" for item in grounding_locations[:8])
+    return _check("repo_grounding", "repo_grounding", status, detail, blocking=True, evidence=evidence)
 
 
-def _boolean_check(name: str, ok: bool, pass_detail: str, fail_detail: str) -> dict[str, str]:
-    return _check(name, "pass" if ok else "fail", pass_detail if ok else fail_detail)
+def _attacker_path_check(report: ParsedReport, dangerous_hits: dict[str, list[str]]) -> dict[str, str]:
+    has_attacker_input = bool(report.attacker_mentions) and _has_attacker_controlled_input(report.text)
+    has_entrypoint = report.has_attack_surface or any(
+        endpoint.split(maxsplit=1)[0] in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+        for endpoint in report.endpoints
+        if " " in endpoint
+    )
+    has_sink = bool(dangerous_hits) or any(term in report.text.lower() for term in RCE_TERMS + FILE_TERMS + SSRF_TERMS)
+    has_source_to_sink = report.has_root_cause and report.has_exploit_chain
+    missing_parts = []
+    if not has_attacker_input:
+        missing_parts.append("attacker input")
+    if not has_entrypoint:
+        missing_parts.append("entrypoint")
+    if not has_sink:
+        missing_parts.append("dangerous sink")
+    if not has_source_to_sink:
+        missing_parts.append("source-to-sink")
+    if not missing_parts:
+        return _check(
+            "attacker_path",
+            "attacker_path",
+            "pass",
+            "Report connects attacker input, entrypoint, sink, and source-to-sink explanation.",
+            blocking=True,
+        )
+    return _check(
+        "attacker_path",
+        "attacker_path",
+        "fail",
+        "Missing attacker-path evidence: " + ", ".join(missing_parts) + ".",
+        blocking=True,
+    )
+
+
+def _owasp_rationalization_check(
+    report: ParsedReport,
+    dangerous_hits: dict[str, list[str]],
+    rules: list[tuple[str, tuple[str, ...]]],
+    check_id: str,
+    category: str,
+) -> dict[str, str]:
+    """Map report wording to OWASP categories without claiming a formal classification.
+
+    This is intentionally deterministic and evidence-light: it gives reviewers a
+    starting rationale for the closest OWASP Top 10 bucket while keeping the row
+    non-blocking because final taxonomy choice is a human disclosure decision.
+    """
+    lower = report.text.lower()
+    capability_terms = " ".join(
+        term.lower() for terms in dangerous_hits.values() for term in terms
+    )
+    haystack = f"{lower} {capability_terms} {' '.join(report.impact_terms).lower()}"
+    matches: list[str] = []
+    for label, keywords in rules:
+        matched_terms = [term for term in keywords if term in haystack]
+        if matched_terms:
+            matches.append(f"{label} ({', '.join(matched_terms[:3])})")
+    matches = _dedupe(matches)[:4]
+    if matches:
+        detail = _owasp_detail_prefix(check_id) + ": " + "; ".join(matches) + "."
+        return _check(check_id, category, "pass", detail, blocking=False)
+    framework = "OWASP LLM Top 10" if check_id == "owasp_llm_top_10" else "OWASP Top 10"
+    return _check(
+        check_id,
+        category,
+        "warn",
+        f"No strong {framework} mapping found; add taxonomy rationale or explain why none applies.",
+        blocking=False,
+    )
+
+
+def _owasp_detail_prefix(check_id: str) -> str:
+    if check_id == "owasp_llm_top_10":
+        return "OWASP Top 10 for LLM Applications candidates"
+    return "OWASP Top 10 candidates"
+
+
+def _has_attacker_controlled_input(text: str) -> bool:
+    return bool(re.search(
+        r"(?i)\b(attacker[- ]controlled|user[- ]controlled|controls?|input|parameter|param|payload|prompt|url|request|body|header|file|workspace content)\b",
+        text,
+    ))
+
+
+def _check(
+    id: str,
+    category: str,
+    status: str,
+    detail: str,
+    *,
+    blocking: bool = False,
+    evidence: str = "",
+) -> dict[str, str]:
+    return {
+        "id": id,
+        "name": id,
+        "category": category,
+        "status": status,
+        "blocking": "true" if blocking else "false",
+        "detail": detail,
+        "evidence": evidence,
+    }
+
+
+def _boolean_check(name: str, category: str, ok: bool, pass_detail: str, fail_detail: str) -> dict[str, str]:
+    return _check(name, category, "pass" if ok else "fail", pass_detail if ok else fail_detail, blocking=not ok)
 
 
 def _join_check_detail(items: list[str]) -> str:
@@ -589,7 +849,7 @@ def vet(repo: Path, report_path: Path, owner_repo: str | None = None) -> VetResu
     questions = generate_questions(report, agent_context, dangerous_hits)
     duplicates = duplicate_search(owner_repo, report)
     verdict, reason, rewrite = decide_verdict(report, missing, agent_context)
-    checks = build_evidence_checklist(report, missing, agent_context)
+    checks = build_evidence_checklist(report, missing, agent_context, evidence_locations, dangerous_hits)
     if duplicates and not duplicates[0].startswith("No obvious") and not duplicates[0].startswith("GitHub duplicate check skipped") and verdict == "PASS":
         verdict = "DUPLICATE_RISK"
         reason = "The finding looks grounded, but similar public GitHub items may already exist."
@@ -632,11 +892,37 @@ def render_markdown(result: VetResult) -> str:
         "",
         result.reason,
         "",
-        "## Evidence checklist",
+        "## Checker result",
         "",
     ]
+    blocking_failures = [item for item in result.checks if item.get("blocking") == "true" and item["status"] == "fail"]
+    warnings = [item for item in result.checks if item["status"] == "warn"]
     lines += [
-        f"- **{item['status'].upper()}** `{item['name']}` — {item['detail']}"
+        f"- Blocking failures: {len(blocking_failures)}",
+        f"- Warnings: {len(warnings)}",
+        "",
+        "### Repo grounding",
+    ]
+    lines += [
+        f"- **{item['status'].upper()}** `{item['id']}` — {item['detail']}"
+        for item in result.checks
+        if item.get("category") == "repo_grounding"
+    ] or ["- No repo-grounding checks generated."]
+    lines += ["", "### Attacker path"]
+    lines += [
+        f"- **{item['status'].upper()}** `{item['id']}` — {item['detail']}"
+        for item in result.checks
+        if item.get("category") == "attacker_path"
+    ] or ["- No attacker-path checks generated."]
+    lines += ["", "### OWASP rationalization"]
+    lines += [
+        f"- **{item['status'].upper()}** `{item['id']}` — {item['detail']}"
+        for item in result.checks
+        if item.get("category") in {"owasp", "owasp_llm"}
+    ] or ["- No OWASP rationalization checks generated."]
+    lines += ["", "## Evidence checklist", ""]
+    lines += [
+        f"- **{item['status'].upper()}** `{item['name']}` ({item.get('category', 'general')}) — {item['detail']}"
         for item in result.checks
     ] or ["- No checklist entries generated."]
     lines += [
