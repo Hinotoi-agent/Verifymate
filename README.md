@@ -28,6 +28,8 @@ Verifymate acts like a checklist-driven review partner: it compares the report t
 
 - Referenced files exist on the current checkout.
 - Referenced symbols, strings, and endpoints appear in the repo.
+- A structured `repo_grounding` gate summarizes whether repo references are line-backed by concrete file/line evidence.
+- A structured `attacker_path` gate checks for the minimum attacker-input → entrypoint → dangerous-sink → source-to-sink story before a finding is worth filing.
 - The report includes an attacker model.
 - The report includes a PoC/repro indicator.
 - Dangerous capability terms exist in the repo.
@@ -72,6 +74,11 @@ JSON output:
 ```bash
 verifymate finding.md --repo /path/to/repo --json
 ```
+
+JSON includes deterministic checker rows under `checks`. Each row has a stable `id`, `category`, `status` (`pass`, `warn`, or `fail`), `blocking`, `detail`, and optional line-backed `evidence`. The first checker gates are:
+
+- `repo_grounding`: whether referenced files, symbols, endpoints, and dangerous capabilities are grounded in the checked-out repo.
+- `attacker_path`: whether the report connects attacker-controlled input, a reachable entrypoint, a dangerous sink, and a source-to-sink explanation.
 
 Strict CI-friendly exit codes:
 
@@ -137,6 +144,19 @@ Verdict: **WEAK**
 ## One-line reason
 
 This appears to involve agent/tool functionality, but the report does not prove unauthorized boundary crossing.
+
+## Checker result
+
+- Blocking failures: 2
+- Warnings: 1
+
+### Repo grounding
+
+- **PASS** `repo_grounding` — Repo grounding is line-backed for 4/4 referenced files/symbols/endpoints/capabilities.
+
+### Attacker path
+
+- **FAIL** `attacker_path` — Missing attacker-path evidence: attacker input, source-to-sink.
 
 ## Maintainer will ask
 
