@@ -49,6 +49,23 @@ SSRF_TERMS = ["ssrf", "server-side request", "metadata", "internal network"]
 AUTH_TERMS = ["auth bypass", "authorization", "authentication", "idor", "privilege"]
 VET_PROFILES = ("preflight", "cve-request", "github-pr", "internal-note")
 
+SENSITIVE_KEYWORDS = (
+    "api_key",
+    "apikey",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "credential",
+    "authorization",
+)
+ASSIGNMENT_VALUE_RE = re.compile(
+    r"(?i)\b([A-Za-z_][\w.-]*)\b(\s*[:=]\s*)([\"']?)([^\"'\s,}]+)([\"']?)"
+)
+AUTH_HEADER_RE = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+USERINFO_DSN_RE = re.compile(r"\b([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^@\s/]+)@", re.I)
+
 OWASP_TOP_10_RULES: list[tuple[str, tuple[str, ...]]] = [
     (
         "A01:2021-Broken Access Control",
@@ -1348,8 +1365,24 @@ def _evidence_location(kind: str, term: str, file: str, line: int, snippet: str)
         "term": term,
         "file": file,
         "line": str(line),
-        "snippet": snippet,
+        "snippet": redact_sensitive_text(snippet),
     }
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Redact common secret-bearing values before they enter reports or JSON output."""
+
+    def _replace_assignment(match: re.Match[str]) -> str:
+        key, sep, quote, _value, closing_quote = match.groups()
+        normalized_key = key.lower().replace("-", "_")
+        if not any(keyword in normalized_key for keyword in SENSITIVE_KEYWORDS):
+            return match.group(0)
+        quote = quote or closing_quote
+        return f"{key}{sep}{quote}[REDACTED]{quote}"
+
+    redacted = AUTH_HEADER_RE.sub(lambda match: f"{match.group(1)} [REDACTED]", text)
+    redacted = ASSIGNMENT_VALUE_RE.sub(_replace_assignment, redacted)
+    return USERINFO_DSN_RE.sub(r"\1[REDACTED]:[REDACTED]@", redacted)
 
 
 def _dedupe_locations(items: Iterable[dict[str, str]]) -> list[dict[str, str]]:
