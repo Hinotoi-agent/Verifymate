@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from finding_vetter.core import parse_report, render_markdown, vet
+from finding_vetter.core import parse_report, redact_sensitive_text, render_markdown, vet
 
 
 def test_weak_agent_rce_needs_boundary(tmp_path: Path):
@@ -442,3 +442,52 @@ def test_internal_note_profile_keeps_missing_source_to_sink_non_fileable(tmp_pat
     assert "not fileable yet" in result.reason
     assert attacker_path["status"] == "warn"
     assert attacker_path["blocking"] == "false"
+
+
+def test_evidence_snippets_redact_secret_values(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "config.py").write_text(
+        "API_KEY = 'live-secret-value'\n"
+        "AUTHORIZATION = 'Bearer header-secret'\n"
+        "DATABASE_URL = 'postgres://user:pass@db.local/app'\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "finding.md"
+    report.write_text(
+        "# Secret exposure\n\n"
+        "Affected files: `config.py`\n\n"
+        "Attacker: remote authenticated user controls request parameters.\n\n"
+        "Root cause: source-to-sink path reaches `API_KEY`.\n\n"
+        "PoC: safe proof with expected result and cleanup.\n\n"
+        "Impact: credential disclosure and secret exposure.\n\n"
+        "Fix: remove hardcoded secrets.\n",
+        encoding="utf-8",
+    )
+
+    result = vet(repo, report)
+    rendered = render_markdown(result)
+
+    snippets = "\n".join(item["snippet"] for item in result.evidence_locations)
+    assert "[REDACTED]" in snippets
+    assert "live-secret-value" not in snippets
+    assert "header-secret" not in snippets
+    assert "user:pass" not in snippets
+    assert "live-secret-value" not in rendered
+    assert "header-secret" not in rendered
+    assert "user:pass" not in rendered
+
+
+def test_redact_sensitive_text_handles_common_secret_shapes():
+    text = (
+        "api_token=abc123 Authorization: Bearer deadbeef "
+        "postgres://app:secret@db.internal/service password: hunter2"
+    )
+
+    redacted = redact_sensitive_text(text)
+
+    assert "abc123" not in redacted
+    assert "deadbeef" not in redacted
+    assert "app:secret" not in redacted
+    assert "hunter2" not in redacted
+    assert redacted.count("[REDACTED]") >= 4

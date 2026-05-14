@@ -34,6 +34,7 @@ Verifymate acts like a checklist-driven review partner: it compares the report t
 - The report includes a PoC/repro indicator.
 - Dangerous capability terms exist in the repo.
 - Line-level evidence locations show where referenced files, symbols, endpoints, and risky capabilities were found.
+- Evidence snippets redact common secret-bearing values before they are written to Markdown or JSON output.
 - Agent/tool context is detected so intended functionality is not mislabeled as RCE.
 - Critical/High RCE reports include MADBugs-style proof context:
   - affected/tested version or current commit
