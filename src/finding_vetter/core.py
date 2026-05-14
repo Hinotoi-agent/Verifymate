@@ -137,6 +137,7 @@ class ParsedReport:
 class VetResult:
     verdict: str
     reason: str
+    checks: list[dict[str, str]] = field(default_factory=list)
     confirmed: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)
@@ -406,6 +407,134 @@ def decide_verdict(report: ParsedReport, missing: list[str], agent_context: bool
     return "PASS", "The report has repo grounding, attacker framing, and repro indicators. Human review may still ask follow-up questions.", "File the report, but include the maintainer-question answers inline."
 
 
+def build_evidence_checklist(
+    report: ParsedReport,
+    missing: list[str],
+    agent_context: bool,
+) -> list[dict[str, str]]:
+    """Return a compact pass/warn/fail checklist for UI and JSON consumers.
+
+    The prose `confirmed` / `missing` lists are useful for humans, but they are hard to
+    scan and hard to gate in automation. This checklist keeps the existing verdicts
+    stable while exposing the main evidence dimensions as structured records.
+    """
+    missing_files = [m for m in missing if "file not found" in m]
+    missing_repo_refs = [
+        m for m in missing if "symbol/string not found" in m or "endpoint/path string not found" in m
+    ]
+    checks: list[dict[str, str]] = [
+        _check(
+            "repo_refs",
+            "fail" if missing_files else "warn" if missing_repo_refs else "pass",
+            "Referenced files/symbols/endpoints resolve on the checked-out repository."
+            if not missing_files and not missing_repo_refs
+            else _join_check_detail(missing_files + missing_repo_refs),
+        ),
+        _check(
+            "attacker_model",
+            "pass" if report.attacker_mentions else "fail",
+            "Attacker position terms found: " + ", ".join(report.attacker_mentions)
+            if report.attacker_mentions
+            else "Report should state who can trigger the issue and with what privileges.",
+        ),
+        _check(
+            "repro",
+            "pass" if report.has_repro else "fail",
+            "PoC/repro indicator found."
+            if report.has_repro
+            else "Report should include a safe minimal reproduction or proof command.",
+        ),
+        _check(
+            "impact",
+            "pass" if report.impact_terms else "warn",
+            "Impact terms found: " + ", ".join(report.impact_terms)
+            if report.impact_terms
+            else "Impact should name the affected asset, boundary, or capability.",
+        ),
+    ]
+
+    if agent_context:
+        lower = report.text.lower()
+        has_boundary = any(
+            term in lower
+            for term in (
+                "boundary",
+                "bypass",
+                "unauth",
+                "approval",
+                "sandbox",
+                "cross-user",
+                "workspace",
+                "secret",
+            )
+        )
+        checks.append(
+            _check(
+                "agent_boundary",
+                "pass" if has_boundary else "warn",
+                "Agent/tool boundary language is present."
+                if has_boundary
+                else "Agent/tool repos need an explicit unauthorized invocation, approval-bypass, sandbox-escape, cross-user, or secret-exposure boundary.",
+            )
+        )
+
+    if _claims_high_impact_rce(report):
+        checks.extend(
+            [
+                _boolean_check(
+                    "affected_version",
+                    report.has_affected_or_tested_version,
+                    "Affected/tested version or commit context is present.",
+                    "Add affected/tested version, commit, or current-HEAD/default-config context.",
+                ),
+                _boolean_check(
+                    "attack_surface",
+                    report.has_attack_surface,
+                    "Attack surface or reachable entrypoint context is present.",
+                    "Add default reachability, entrypoint, auth, and exposure context.",
+                ),
+                _boolean_check(
+                    "root_cause",
+                    report.has_root_cause,
+                    "Root-cause/source-to-sink explanation is present.",
+                    "Trace attacker input from entrypoint to vulnerable sink.",
+                ),
+                _boolean_check(
+                    "exploit_chain",
+                    report.has_exploit_chain,
+                    "Exploit chain or trigger path is present.",
+                    "List the steps from attacker input to impact.",
+                ),
+                _boolean_check(
+                    "safe_poc",
+                    report.has_safe_side_effect,
+                    "PoC describes expected result, cleanup, or safe side effect.",
+                    "Use a harmless side effect and document expected result plus cleanup.",
+                ),
+                _boolean_check(
+                    "fix_guidance",
+                    report.has_fix_guidance,
+                    "Fix, patch, or mitigation guidance is present.",
+                    "Add concise mitigation guidance for the maintainer.",
+                ),
+            ]
+        )
+
+    return checks
+
+
+def _check(name: str, status: str, detail: str) -> dict[str, str]:
+    return {"name": name, "status": status, "detail": detail}
+
+
+def _boolean_check(name: str, ok: bool, pass_detail: str, fail_detail: str) -> dict[str, str]:
+    return _check(name, "pass" if ok else "fail", pass_detail if ok else fail_detail)
+
+
+def _join_check_detail(items: list[str]) -> str:
+    return "; ".join(items[:3]) + ("; ..." if len(items) > 3 else "")
+
+
 def duplicate_search(owner_repo: str | None, report: ParsedReport) -> list[str]:
     if not owner_repo:
         return []
@@ -449,12 +578,14 @@ def vet(repo: Path, report_path: Path, owner_repo: str | None = None) -> VetResu
     questions = generate_questions(report, agent_context, dangerous_hits)
     duplicates = duplicate_search(owner_repo, report)
     verdict, reason, rewrite = decide_verdict(report, missing, agent_context)
+    checks = build_evidence_checklist(report, missing, agent_context)
     if duplicates and not duplicates[0].startswith("No obvious") and not duplicates[0].startswith("GitHub duplicate check skipped") and verdict == "PASS":
         verdict = "DUPLICATE_RISK"
         reason = "The finding looks grounded, but similar public GitHub items may already exist."
     return VetResult(
         verdict=verdict,
         reason=reason,
+        checks=checks,
         confirmed=_dedupe(confirmed),
         missing=_dedupe(missing),
         questions=questions,
@@ -488,6 +619,15 @@ def render_markdown(result: VetResult) -> str:
         "## One-line reason",
         "",
         result.reason,
+        "",
+        "## Evidence checklist",
+        "",
+    ]
+    lines += [
+        f"- **{item['status'].upper()}** `{item['name']}` — {item['detail']}"
+        for item in result.checks
+    ] or ["- No checklist entries generated."]
+    lines += [
         "",
         "## Confirmed from repo/report",
         "",

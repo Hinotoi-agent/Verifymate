@@ -20,6 +20,11 @@ def test_weak_agent_rce_needs_boundary(tmp_path: Path):
     assert result.verdict == "WEAK"
     assert "boundary" in result.reason.lower()
     assert any("agent/tool" in q.lower() for q in result.questions)
+    assert any(check["name"] == "agent_boundary" for check in result.checks)
+    assert any(
+        check["name"] == "attacker_model" and check["status"] == "fail"
+        for check in result.checks
+    )
 
 
 def test_missing_file_invalid(tmp_path: Path):

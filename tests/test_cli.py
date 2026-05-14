@@ -42,5 +42,8 @@ def test_cli_strict_returns_nonzero_for_needs_work(tmp_path: Path, capsys):
 
     code = main([str(report), "--repo", str(repo), "--strict"])
 
+    out = capsys.readouterr().out
     assert code == 2
-    assert "Verdict: **NEEDS_WORK**" in capsys.readouterr().out
+    assert "Verdict: **NEEDS_WORK**" in out
+    assert "## Evidence checklist" in out
+    assert "`repro`" in out

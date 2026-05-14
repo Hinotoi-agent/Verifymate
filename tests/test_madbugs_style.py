@@ -8,6 +8,7 @@ def _write_rce_repo(tmp_path: Path) -> Path:
     (repo / "server").mkdir(parents=True)
     (repo / "server" / "handler.py").write_text(
         "import subprocess\n\n"
+        "ROUTE = '/run'\n\n"
         "def handle(request):\n"
         "    cmd = request.json['cmd']\n"
         "    return subprocess.run(cmd, shell=True)\n",
@@ -69,3 +70,12 @@ def test_madbugs_style_rce_report_passes_with_versions_chain_and_fix(tmp_path: P
     assert any("affected/tested version" in item.lower() for item in result.confirmed)
     assert any("root-cause" in item.lower() for item in result.confirmed)
     assert not any("safe side effect" in item.lower() for item in result.missing)
+    assert {check["status"] for check in result.checks} == {"pass"}
+    assert {check["name"] for check in result.checks} >= {
+        "affected_version",
+        "attack_surface",
+        "root_cause",
+        "exploit_chain",
+        "safe_poc",
+        "fix_guidance",
+    }
