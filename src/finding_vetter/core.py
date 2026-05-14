@@ -140,6 +140,7 @@ class VetResult:
     checks: list[dict[str, str]] = field(default_factory=list)
     confirmed: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
+    evidence_locations: list[dict[str, str]] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)
     duplicate_matches: list[str] = field(default_factory=list)
     suggested_rewrite: str = ""
@@ -240,9 +241,10 @@ def _looks_like_source_path(ref: str) -> bool:
     return bool(re.search(r"\.(py|js|ts|tsx|jsx|go|rs|java|rb|php|c|cc|cpp|h|hpp|yml|yaml|json|toml|md)$", ref))
 
 
-def collect_repo_evidence(repo: Path, report: ParsedReport) -> tuple[list[str], list[str], bool, dict[str, list[str]]]:
+def collect_repo_evidence(repo: Path, report: ParsedReport) -> tuple[list[str], list[str], list[dict[str, str]], bool, dict[str, list[str]]]:
     confirmed: list[str] = []
     missing: list[str] = []
+    evidence_locations: list[dict[str, str]] = []
     dangerous_hits: dict[str, list[str]] = {}
 
     all_text_files = list(_iter_text_files(repo))
@@ -257,19 +259,24 @@ def collect_repo_evidence(repo: Path, report: ParsedReport) -> tuple[list[str], 
         path = (repo / file_ref).resolve()
         if path.exists() and _is_relative_to(path, repo.resolve()):
             confirmed.append(f"Referenced file exists: `{file_ref}`")
+            evidence_locations.append(_evidence_location("file", file_ref, file_ref, 1, "Referenced file exists."))
         else:
             missing.append(f"Referenced file not found on current checkout: `{file_ref}`")
 
     for symbol in report.symbols[:50]:
-        if _search_literal(all_text_files, symbol):
+        hit = _find_literal_location(all_text_files, symbol, repo)
+        if hit:
             confirmed.append(f"Referenced symbol/string found: `{symbol}`")
+            evidence_locations.append(_evidence_location("symbol", symbol, *hit))
         else:
             missing.append(f"Referenced symbol/string not found: `{symbol}`")
 
     for endpoint in report.endpoints[:30]:
         needle = endpoint.split(maxsplit=1)[-1]
-        if _search_literal(all_text_files, needle):
+        hit = _find_literal_location(all_text_files, needle, repo)
+        if hit:
             confirmed.append(f"Referenced endpoint/path string found: `{endpoint}`")
+            evidence_locations.append(_evidence_location("endpoint", endpoint, *hit))
         else:
             missing.append(f"Referenced endpoint/path string not found: `{endpoint}`")
 
@@ -278,6 +285,10 @@ def collect_repo_evidence(repo: Path, report: ParsedReport) -> tuple[list[str], 
         if hits:
             dangerous_hits[category] = hits[:8]
             confirmed.append(f"Dangerous-capability terms present ({category}): {', '.join(hits[:5])}")
+            for term in hits[:3]:
+                hit = _find_literal_location(all_text_files, term, repo, case_sensitive=False)
+                if hit:
+                    evidence_locations.append(_evidence_location(category, term, *hit))
 
     if report.has_repro:
         confirmed.append("Report appears to include a PoC/repro section or command.")
@@ -292,7 +303,7 @@ def collect_repo_evidence(repo: Path, report: ParsedReport) -> tuple[list[str], 
     if _claims_high_impact_rce(report):
         _add_madbugs_style_evidence(report, confirmed, missing)
 
-    return confirmed, missing, agent_context, dangerous_hits
+    return confirmed, missing, _dedupe_locations(evidence_locations), agent_context, dangerous_hits
 
 
 def _claims_high_impact_rce(report: ParsedReport) -> bool:
@@ -574,7 +585,7 @@ def duplicate_search(owner_repo: str | None, report: ParsedReport) -> list[str]:
 
 def vet(repo: Path, report_path: Path, owner_repo: str | None = None) -> VetResult:
     report = parse_report(report_path)
-    confirmed, missing, agent_context, dangerous_hits = collect_repo_evidence(repo, report)
+    confirmed, missing, evidence_locations, agent_context, dangerous_hits = collect_repo_evidence(repo, report)
     questions = generate_questions(report, agent_context, dangerous_hits)
     duplicates = duplicate_search(owner_repo, report)
     verdict, reason, rewrite = decide_verdict(report, missing, agent_context)
@@ -588,6 +599,7 @@ def vet(repo: Path, report_path: Path, owner_repo: str | None = None) -> VetResu
         checks=checks,
         confirmed=_dedupe(confirmed),
         missing=_dedupe(missing),
+        evidence_locations=evidence_locations,
         questions=questions,
         duplicate_matches=duplicates,
         suggested_rewrite=rewrite,
@@ -633,6 +645,12 @@ def render_markdown(result: VetResult) -> str:
         "",
     ]
     lines += _bullet_list(result.confirmed, empty="No strong confirming evidence found.")
+    if result.evidence_locations:
+        lines += ["", "## Evidence locations", ""]
+        lines += [
+            f"- `{item['file']}:{item['line']}` — **{item['kind']}** `{item['term']}`: {item['snippet']}"
+            for item in result.evidence_locations
+        ]
     lines += ["", "## Missing or weak evidence", ""]
     lines += _bullet_list(result.missing, empty="No obvious blockers found by the lightweight checks.")
     lines += ["", "## Maintainer will ask", ""]
@@ -675,6 +693,43 @@ def _search_literal(files: Iterable[Path], needle: str) -> bool:
             return True
     return False
 
+
+
+def _find_literal_location(files: Iterable[Path], needle: str, repo: Path, *, case_sensitive: bool = True) -> tuple[str, int, str] | None:
+    if not needle:
+        return None
+    needle_cmp = needle if case_sensitive else needle.lower()
+    for path in files:
+        try:
+            rel = path.relative_to(repo).as_posix()
+        except ValueError:
+            rel = path.as_posix()
+        for line_no, line in enumerate(_safe_read(path).splitlines(), 1):
+            haystack = line if case_sensitive else line.lower()
+            if needle_cmp in haystack:
+                return rel, line_no, line.strip()[:200]
+    return None
+
+
+def _evidence_location(kind: str, term: str, file: str, line: int, snippet: str) -> dict[str, str]:
+    return {
+        "kind": kind,
+        "term": term,
+        "file": file,
+        "line": str(line),
+        "snippet": snippet,
+    }
+
+
+def _dedupe_locations(items: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[tuple[str, str, str, str]] = set()
+    out: list[dict[str, str]] = []
+    for item in items:
+        key = (item["kind"], item["term"], item["file"], item["line"])
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out[:40]
 
 def _dedupe(items: Iterable[str]) -> list[str]:
     seen = set()
