@@ -26,7 +26,7 @@ Verifymate acts like a checklist-driven review partner: it compares the report t
 
 ## What it checks
 
-- Referenced files exist on the current checkout.
+- Referenced files exist on the current checkout, including common review forms like `src/app.py:42` and `src/app.py#L42-L50`.
 - Referenced symbols, strings, and endpoints appear in the repo.
 - A structured `repo_grounding` gate summarizes whether repo references are line-backed by concrete file/line evidence.
 - A structured `attacker_path` gate checks for the minimum attacker-input → entrypoint → dangerous-sink → source-to-sink story before a finding is worth filing.
@@ -68,6 +68,21 @@ Optional duplicate search:
 ```bash
 verifymate finding.md --repo /path/to/repo --github owner/repo
 ```
+
+Profile-aware readiness checks:
+
+```bash
+verifymate finding.md --repo /path/to/repo --profile cve-request --github owner/repo
+```
+
+For a complete preflight workflow that stores Markdown and JSON outputs beside each security-review draft, see [docs/security-review-workflow.md](docs/security-review-workflow.md).
+
+Profiles tune deterministic evidence expectations without making Verifymate an exploit generator or automatic report writer:
+
+- `preflight` (default): minimum evidence bar before spending deeper review time.
+- `cve-request`: stricter CVE/VulnCheck-style filing readiness; expects affected/tested version context, safe repro details, fix guidance, and duplicate/prior-art review evidence or `--github owner/repo`.
+- `github-pr`: patch/PR readiness; expects affected files and fix direction.
+- `internal-note`: vault triage mode; records missing repro/source-to-sink evidence as non-blocking triage debt, but still returns a non-fileable `NEEDS_WORK` verdict.
 
 JSON output:
 

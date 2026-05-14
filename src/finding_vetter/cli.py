@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 
-from .core import REPORT_TEMPLATES, render_markdown, render_report_template, vet
+from .core import REPORT_TEMPLATES, VET_PROFILES, render_markdown, render_report_template, vet
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,6 +15,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("report", type=Path, nargs="?", help="Markdown vulnerability report to vet")
     parser.add_argument("--repo", type=Path, help="Repository checkout to compare against")
     parser.add_argument("--github", help="Optional GitHub owner/repo for simple duplicate search")
+    parser.add_argument(
+        "--profile",
+        choices=VET_PROFILES,
+        default="preflight",
+        help="Validation profile: preflight, cve-request, github-pr, or internal-note.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of Markdown")
     parser.add_argument("--out", type=Path, help="Write output to a file instead of stdout")
     parser.add_argument(
@@ -48,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.report.exists():
         parser.error(f"report path does not exist: {args.report}")
 
-    result = vet(args.repo, args.report, args.github)
+    result = vet(args.repo, args.report, args.github, profile=args.profile)
     output = result.to_json() if args.json else render_markdown(result)
     _emit(output, args.out)
     if args.strict and result.verdict not in {"PASS", "DUPLICATE_RISK"}:

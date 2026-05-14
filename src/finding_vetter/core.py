@@ -8,7 +8,16 @@ import subprocess
 from typing import Iterable
 
 DANGEROUS_TERMS = {
-    "command execution": ["subprocess", "os.system", "exec(", "eval(", "shell=True", "child_process", "Runtime.getRuntime", "ProcessBuilder"],
+    "command execution": [
+        "subprocess",
+        "os.system",
+        "exec(",
+        "eval(",
+        "shell=True",
+        "child_process",
+        "Runtime.getRuntime",
+        "ProcessBuilder",
+    ],
     "file read/write": ["open(", "readFile", "writeFile", "send_file", "FileResponse", "Path("],
     "deserialization": ["pickle.load", "yaml.load", "loads(", "deserialize", "ObjectInputStream"],
     "ssrf/fetch": ["requests.get", "httpx.get", "fetch(", "axios", "urllib.request", "curl"],
@@ -16,14 +25,29 @@ DANGEROUS_TERMS = {
 }
 
 AGENT_TERMS = [
-    "agent", "tool", "tools", "mcp", "workflow", "executor", "runner", "sandbox",
-    "workspace", "prompt", "llm", "approval", "terminal", "browser", "plugin", "function_call",
+    "agent",
+    "tool",
+    "tools",
+    "mcp",
+    "workflow",
+    "executor",
+    "runner",
+    "sandbox",
+    "workspace",
+    "prompt",
+    "llm",
+    "approval",
+    "terminal",
+    "browser",
+    "plugin",
+    "function_call",
 ]
 
 RCE_TERMS = ["rce", "remote code", "command execution", "arbitrary command", "code execution"]
 FILE_TERMS = ["file read", "arbitrary file", "path traversal", "lfi", "directory traversal"]
 SSRF_TERMS = ["ssrf", "server-side request", "metadata", "internal network"]
 AUTH_TERMS = ["auth bypass", "authorization", "authentication", "idor", "privilege"]
+VET_PROFILES = ("preflight", "cve-request", "github-pr", "internal-note")
 
 OWASP_TOP_10_RULES: list[tuple[str, tuple[str, ...]]] = [
     (
@@ -111,7 +135,10 @@ OWASP_LLM_TOP_10_RULES: list[tuple[str, tuple[str, ...]]] = [
         ("embedding", "vector", "rag", "retrieval", "index poisoning"),
     ),
     ("LLM09:2025 Misinformation", ("misinformation", "hallucination", "incorrect output")),
-    ("LLM10:2025 Unbounded Consumption", ("unbounded", "resource exhaustion", "denial of service", "dos")),
+    (
+        "LLM10:2025 Unbounded Consumption",
+        ("unbounded", "resource exhaustion", "denial of service", "dos"),
+    ),
 ]
 
 REPORT_TEMPLATES: dict[str, str] = {
@@ -256,7 +283,10 @@ def parse_report(path: Path) -> ParsedReport:
     if title_match:
         report.title = title_match.group(1).strip()
 
-    sev_match = re.search(r"(?im)^\s*(?:severity|impact)\s*[:\-]\s*(critical|high|medium|low|informational|info)\b", text)
+    sev_match = re.search(
+        r"(?im)^\s*(?:severity|impact)\s*[:\-]\s*(critical|high|medium|low|informational|info)\b",
+        text,
+    )
     if sev_match:
         report.severity = sev_match.group(1).title()
 
@@ -274,41 +304,74 @@ def parse_report(path: Path) -> ParsedReport:
             if not _looks_like_path(symbol)
         )
     )
-    endpoint_candidates = re.findall(r"`?((?:(?:GET|POST|PUT|PATCH|DELETE)\s+)?/[A-Za-z0-9_./{}:\-]+)`?", text)
-    report.endpoints = sorted(set(
-        e for e in endpoint_candidates
-        if not _looks_like_source_path(e.split(maxsplit=1)[-1])
-        and not e.split(maxsplit=1)[-1].startswith(("//", "/tmp/", "/var/", "/Users/", "/home/"))
-    ))
+    endpoint_candidates = re.findall(
+        r"`?((?:(?:GET|POST|PUT|PATCH|DELETE)\s+)?/[A-Za-z0-9_./{}:\-]+)`?", text
+    )
+    report.endpoints = sorted(
+        set(
+            e
+            for e in endpoint_candidates
+            if not _looks_like_source_path(e.split(maxsplit=1)[-1])
+            and not e.split(maxsplit=1)[-1].startswith(
+                ("//", "/tmp/", "/var/", "/Users/", "/home/")
+            )
+        )
+    )
 
-    report.has_repro = bool(re.search(r"(?i)\b(poc|proof|repro|curl|httpie|python - <<|steps to reproduce|minimal test)\b", text))
-    report.attacker_mentions = sorted(set(re.findall(r"(?i)\b(unauthenticated|remote|authenticated|low-privilege|workspace member|malicious website|prompt injection|admin|operator|local user)\b", text)))
+    report.has_repro = bool(
+        re.search(
+            r"(?i)\b(poc|proof|repro|curl|httpie|python - <<|steps to reproduce|minimal test)\b",
+            text,
+        )
+    )
+    report.attacker_mentions = sorted(
+        set(
+            re.findall(
+                r"(?i)\b(unauthenticated|remote|authenticated|low-privilege|workspace member|malicious website|prompt injection|admin|operator|local user)\b",
+                text,
+            )
+        )
+    )
     lower = text.lower()
-    report.impact_terms = [t for t in RCE_TERMS + FILE_TERMS + SSRF_TERMS + AUTH_TERMS if t in lower]
-    report.has_affected_or_tested_version = bool(re.search(
-        r"(?im)^\s*(?:affected(?!\s+files?)|tested on|confirmed against|version|commit|current head|default configuration)\b",
-        text,
-    ))
-    report.has_attack_surface = bool(re.search(
-        r"(?i)\b(attack surface|entrypoint|entry point|reachable|default configuration|port \d+|victim action)\b",
-        text,
-    ))
-    report.has_root_cause = bool(re.search(
-        r"(?i)\b(root cause|bug is|vulnerability is|without checking|without auth|bounds check|validation|sanitize|source-to-sink|copies attacker-controlled)\b",
-        text,
-    ))
-    report.has_exploit_chain = bool(re.search(
-        r"(?i)\b(exploit chain|trigger|primitive|source[- ]to[- ]sink|->|leads to|reaches the sink|flows? to|reaches?)\b",
-        text,
-    ))
-    report.has_safe_side_effect = bool(re.search(
-        r"(?i)\b(expected result|actual result|safe side effect|created and then removed|cleanup|rm /tmp|test -f|id > /tmp|touch /tmp)\b",
-        text,
-    ))
-    report.has_fix_guidance = bool(re.search(
-        r"(?i)\b(fix|patch|mitigation|remediation|allowlist|denylist|bounds check|validate|sanitize|shell=false|authentication)\b",
-        text,
-    ))
+    report.impact_terms = [
+        t for t in RCE_TERMS + FILE_TERMS + SSRF_TERMS + AUTH_TERMS if t in lower
+    ]
+    report.has_affected_or_tested_version = bool(
+        re.search(
+            r"(?im)^\s*(?:affected(?!\s+files?)|tested on|confirmed against|version|commit|current head|default configuration)\b",
+            text,
+        )
+    )
+    report.has_attack_surface = bool(
+        re.search(
+            r"(?i)\b(attack surface|entrypoint|entry point|reachable|default configuration|port \d+|victim action)\b",
+            text,
+        )
+    )
+    report.has_root_cause = bool(
+        re.search(
+            r"(?i)\b(root cause|bug is|vulnerability is|without checking|without auth|bounds check|validation|sanitize|source-to-sink|copies attacker-controlled)\b",
+            text,
+        )
+    )
+    report.has_exploit_chain = bool(
+        re.search(
+            r"(?i)\b(exploit chain|trigger|primitive|source[- ]to[- ]sink|->|leads to|reaches the sink|flows? to|reaches?)\b",
+            text,
+        )
+    )
+    report.has_safe_side_effect = bool(
+        re.search(
+            r"(?i)\b(expected result|actual result|safe side effect|created and then removed|cleanup|rm /tmp|test -f|id > /tmp|touch /tmp)\b",
+            text,
+        )
+    )
+    report.has_fix_guidance = bool(
+        re.search(
+            r"(?i)\b(fix|patch|mitigation|remediation|allowlist|denylist|bounds check|validate|sanitize|shell=false|authentication)\b",
+            text,
+        )
+    )
     return report
 
 
@@ -319,7 +382,10 @@ def _extract_paths(text: str) -> list[str]:
 
 
 def _clean_file_ref(ref: str) -> str:
-    return ref.strip().strip(".,:;()[]{}'\"")
+    cleaned = ref.strip().strip(".,:;()[]{}'\"")
+    cleaned = re.sub(r"#L\d+(?:-L\d+)?$", "", cleaned)
+    cleaned = re.sub(r":\d+(?::\d+)?$", "", cleaned)
+    return cleaned
 
 
 def _looks_like_path(ref: str) -> bool:
@@ -333,10 +399,16 @@ def _looks_like_path(ref: str) -> bool:
 
 
 def _looks_like_source_path(ref: str) -> bool:
-    return bool(re.search(r"\.(py|js|ts|tsx|jsx|go|rs|java|rb|php|c|cc|cpp|h|hpp|yml|yaml|json|toml|md)$", ref))
+    return bool(
+        re.search(
+            r"\.(py|js|ts|tsx|jsx|go|rs|java|rb|php|c|cc|cpp|h|hpp|yml|yaml|json|toml|md)$", ref
+        )
+    )
 
 
-def collect_repo_evidence(repo: Path, report: ParsedReport) -> tuple[list[str], list[str], list[dict[str, str]], bool, dict[str, list[str]]]:
+def collect_repo_evidence(
+    repo: Path, report: ParsedReport
+) -> tuple[list[str], list[str], list[dict[str, str]], bool, dict[str, list[str]]]:
     confirmed: list[str] = []
     missing: list[str] = []
     evidence_locations: list[dict[str, str]] = []
@@ -354,7 +426,9 @@ def collect_repo_evidence(repo: Path, report: ParsedReport) -> tuple[list[str], 
         path = (repo / file_ref).resolve()
         if path.exists() and _is_relative_to(path, repo.resolve()):
             confirmed.append(f"Referenced file exists: `{file_ref}`")
-            evidence_locations.append(_evidence_location("file", file_ref, file_ref, 1, "Referenced file exists."))
+            evidence_locations.append(
+                _evidence_location("file", file_ref, file_ref, 1, "Referenced file exists.")
+            )
         else:
             missing.append(f"Referenced file not found on current checkout: `{file_ref}`")
 
@@ -379,7 +453,9 @@ def collect_repo_evidence(repo: Path, report: ParsedReport) -> tuple[list[str], 
         hits = [term for term in terms if term.lower() in repo_blob_lower]
         if hits:
             dangerous_hits[category] = hits[:8]
-            confirmed.append(f"Dangerous-capability terms present ({category}): {', '.join(hits[:5])}")
+            confirmed.append(
+                f"Dangerous-capability terms present ({category}): {', '.join(hits[:5])}"
+            )
             for term in hits[:3]:
                 hit = _find_literal_location(all_text_files, term, repo, case_sensitive=False)
                 if hit:
@@ -393,7 +469,9 @@ def collect_repo_evidence(repo: Path, report: ParsedReport) -> tuple[list[str], 
     if report.attacker_mentions:
         confirmed.append("Attacker model terms present: " + ", ".join(report.attacker_mentions))
     else:
-        missing.append("No clear attacker position found, e.g. unauthenticated, low-privilege, malicious website, prompt injection.")
+        missing.append(
+            "No clear attacker position found, e.g. unauthenticated, low-privilege, malicious website, prompt injection."
+        )
 
     if _claims_high_impact_rce(report):
         _add_madbugs_style_evidence(report, confirmed, missing)
@@ -408,7 +486,9 @@ def _claims_high_impact_rce(report: ParsedReport) -> bool:
     )
 
 
-def _add_madbugs_style_evidence(report: ParsedReport, confirmed: list[str], missing: list[str]) -> None:
+def _add_madbugs_style_evidence(
+    report: ParsedReport, confirmed: list[str], missing: list[str]
+) -> None:
     checks = [
         (
             report.has_affected_or_tested_version,
@@ -448,7 +528,9 @@ def _add_madbugs_style_evidence(report: ParsedReport, confirmed: list[str], miss
             missing.append(bad)
 
 
-def generate_questions(report: ParsedReport, agent_context: bool, dangerous_hits: dict[str, list[str]]) -> list[str]:
+def generate_questions(
+    report: ParsedReport, agent_context: bool, dangerous_hits: dict[str, list[str]]
+) -> list[str]:
     lower = report.text.lower()
     questions: list[str] = [
         "What exact attacker-controlled input starts the exploit chain?",
@@ -485,32 +567,89 @@ def generate_questions(report: ParsedReport, agent_context: bool, dangerous_hits
             "What privilege does the attacker start with and what privilege do they gain?",
         ]
 
-    questions.append("What would the maintainer say to dismiss this as intended, admin-only, duplicate, or out of scope?")
+    questions.append(
+        "What would the maintainer say to dismiss this as intended, admin-only, duplicate, or out of scope?"
+    )
     return _dedupe(questions)[:10]
 
 
-def decide_verdict(report: ParsedReport, missing: list[str], agent_context: bool) -> tuple[str, str, str]:
+def decide_verdict(
+    report: ParsedReport, missing: list[str], agent_context: bool, profile: str = "preflight"
+) -> tuple[str, str, str]:
     missing_files = [m for m in missing if "file not found" in m]
-    missing_symbols = [m for m in missing if "symbol/string not found" in m or "endpoint/path string not found" in m]
+    missing_symbols = [
+        m
+        for m in missing
+        if "symbol/string not found" in m or "endpoint/path string not found" in m
+    ]
     no_repro = any("No obvious PoC" in m for m in missing)
     no_attacker = any("No clear attacker" in m for m in missing)
-    missing_madbugs_rce_context = [m for m in missing if m.startswith("Critical RCE needs") or m.startswith("Critical RCE PoC")]
+    missing_madbugs_rce_context = [
+        m for m in missing if m.startswith("Critical RCE needs") or m.startswith("Critical RCE PoC")
+    ]
     lower = report.text.lower()
-    claimed_critical_rce = (report.severity or "").lower() == "critical" or "critical" in lower and any(t in lower for t in RCE_TERMS)
+    claimed_critical_rce = (
+        (report.severity or "").lower() == "critical"
+        or "critical" in lower
+        and any(t in lower for t in RCE_TERMS)
+    )
 
     if missing_files or (missing_symbols and len(missing_symbols) >= 3):
-        return "INVALID", "Important referenced repo evidence is missing on current checkout.", "Do not file yet. First correct file/symbol/endpoint references against current HEAD."
-    if agent_context and claimed_critical_rce and ("boundary" not in lower and "bypass" not in lower and "unauth" not in lower):
-        return "WEAK", "This appears to involve agent/tool functionality, but the report does not prove unauthorized boundary crossing.", "Rewrite as a potential boundary issue, then prove unauthorized invocation, approval bypass, sandbox escape, cross-user impact, or secret exposure."
+        return (
+            "INVALID",
+            "Important referenced repo evidence is missing on current checkout.",
+            "Do not file yet. First correct file/symbol/endpoint references against current HEAD.",
+        )
+    if (
+        agent_context
+        and claimed_critical_rce
+        and ("boundary" not in lower and "bypass" not in lower and "unauth" not in lower)
+    ):
+        return (
+            "WEAK",
+            "This appears to involve agent/tool functionality, but the report does not prove unauthorized boundary crossing.",
+            "Rewrite as a potential boundary issue, then prove unauthorized invocation, approval bypass, sandbox escape, cross-user impact, or secret exposure.",
+        )
     if no_attacker:
-        return "WEAK", "The report does not define who the attacker is or how they reach the issue.", "Add a precise attacker model before claiming severity."
+        return (
+            "WEAK",
+            "The report does not define who the attacker is or how they reach the issue.",
+            "Add a precise attacker model before claiming severity.",
+        )
     if claimed_critical_rce and missing_madbugs_rce_context:
-        return "NEEDS_WORK", "Critical RCE is plausible, but missing MADBugs-style context: affected/tested version, root cause, exploit chain, safe PoC evidence, or fix guidance.", "Add the affected/tested version, default attack surface, source-to-sink root cause, safe side-effect PoC with cleanup, and concise fix guidance."
+        return (
+            "NEEDS_WORK",
+            "Critical RCE is plausible, but missing MADBugs-style context: affected/tested version, root cause, exploit chain, safe PoC evidence, or fix guidance.",
+            "Add the affected/tested version, default attack surface, source-to-sink root cause, safe side-effect PoC with cleanup, and concise fix guidance.",
+        )
+    if no_repro and profile == "internal-note":
+        return (
+            "NEEDS_WORK",
+            "Internal-note profile allows rough triage, but this note is not ready to file without a minimal repro.",
+            "Keep as an internal note until a safe current-HEAD repro or code-path proof is added.",
+        )
     if no_repro:
-        return "NEEDS_WORK", "The claim may be plausible, but it lacks a minimal PoC/repro.", "Add a safe repro against current HEAD and document expected vs actual result."
-    if claimed_critical_rce and "auth" not in lower and "unauth" not in lower and "approval" not in lower:
-        return "NEEDS_WORK", "Critical RCE is claimed without enough auth/approval/default-exposure analysis.", "Add default exposure, auth, and approval analysis or downgrade severity."
-    return "PASS", "The report has repo grounding, attacker framing, and repro indicators. Human review may still ask follow-up questions.", "File the report, but include the maintainer-question answers inline."
+        return (
+            "NEEDS_WORK",
+            "The claim may be plausible, but it lacks a minimal PoC/repro.",
+            "Add a safe repro against current HEAD and document expected vs actual result.",
+        )
+    if (
+        claimed_critical_rce
+        and "auth" not in lower
+        and "unauth" not in lower
+        and "approval" not in lower
+    ):
+        return (
+            "NEEDS_WORK",
+            "Critical RCE is claimed without enough auth/approval/default-exposure analysis.",
+            "Add default exposure, auth, and approval analysis or downgrade severity.",
+        )
+    return (
+        "PASS",
+        "The report has repo grounding, attacker framing, and repro indicators. Human review may still ask follow-up questions.",
+        "File the report, but include the maintainer-question answers inline.",
+    )
 
 
 def build_evidence_checklist(
@@ -519,6 +658,8 @@ def build_evidence_checklist(
     agent_context: bool,
     evidence_locations: list[dict[str, str]] | None = None,
     dangerous_hits: dict[str, list[str]] | None = None,
+    profile: str = "preflight",
+    duplicate_search_requested: bool = False,
 ) -> list[dict[str, str]]:
     """Return deterministic checker gates for UI and JSON consumers.
 
@@ -531,14 +672,18 @@ def build_evidence_checklist(
     dangerous_hits = dangerous_hits or {}
     missing_files = [m for m in missing if "file not found" in m]
     missing_repo_refs = [
-        m for m in missing if "symbol/string not found" in m or "endpoint/path string not found" in m
+        m
+        for m in missing
+        if "symbol/string not found" in m or "endpoint/path string not found" in m
     ]
     repo_grounding = _repo_grounding_check(missing_files, missing_repo_refs, evidence_locations)
     attacker_path = _attacker_path_check(report, dangerous_hits)
     checks: list[dict[str, str]] = [
         repo_grounding,
         attacker_path,
-        _owasp_rationalization_check(report, dangerous_hits, OWASP_TOP_10_RULES, "owasp_top_10", "owasp"),
+        _owasp_rationalization_check(
+            report, dangerous_hits, OWASP_TOP_10_RULES, "owasp_top_10", "owasp"
+        ),
         _owasp_rationalization_check(
             report,
             dangerous_hits,
@@ -662,7 +807,126 @@ def build_evidence_checklist(
             ]
         )
 
+    checks.extend(_profile_checks(report, profile, duplicate_search_requested))
+    checks = _apply_profile_blocking(checks, profile)
     return checks
+
+
+def _profile_checks(
+    report: ParsedReport, profile: str, duplicate_search_requested: bool
+) -> list[dict[str, str]]:
+    """Return deterministic profile-specific readiness rows.
+
+    Profiles tune disclosure-readiness expectations without changing Verifymate into
+    an exploit generator or static analyzer. They are intentionally based on report
+    evidence and CLI options only.
+    """
+    if profile not in VET_PROFILES:
+        allowed = ", ".join(VET_PROFILES)
+        raise ValueError(f"unknown profile {profile!r}; choose one of: {allowed}")
+
+    checks: list[dict[str, str]] = [
+        _check(
+            "profile",
+            "profile",
+            "pass",
+            f"Using `{profile}` validation profile.",
+            blocking=False,
+        )
+    ]
+    if profile == "preflight":
+        return checks
+
+    if profile == "cve-request":
+        checks.extend(
+            [
+                _boolean_check(
+                    "profile_cve_affected_version",
+                    "profile",
+                    report.has_affected_or_tested_version,
+                    "CVE request includes affected/tested version context.",
+                    "CVE requests should state affected versions, tested commit, or current-HEAD context.",
+                ),
+                _boolean_check(
+                    "profile_cve_safe_repro",
+                    "profile",
+                    report.has_repro and report.has_safe_side_effect,
+                    "CVE request includes a safe repro with expected result or cleanup context.",
+                    "CVE requests should include a safe repro or code-path proof with expected result and cleanup.",
+                ),
+                _boolean_check(
+                    "profile_cve_fix_guidance",
+                    "profile",
+                    report.has_fix_guidance,
+                    "CVE request includes concise mitigation guidance.",
+                    "CVE requests should include concise fix or mitigation guidance.",
+                ),
+                _boolean_check(
+                    "profile_cve_duplicate_review",
+                    "profile",
+                    duplicate_search_requested or _has_duplicate_review_evidence(report.text),
+                    "CVE request includes duplicate/prior-art review evidence or `--github` search was requested.",
+                    "CVE requests should include duplicate/prior-art review evidence or be run with `--github owner/repo`.",
+                ),
+            ]
+        )
+    elif profile == "github-pr":
+        checks.extend(
+            [
+                _boolean_check(
+                    "profile_pr_files",
+                    "profile",
+                    bool(report.files),
+                    "GitHub PR profile has affected file references.",
+                    "GitHub PR profile should name the files or components the patch changes.",
+                ),
+                _boolean_check(
+                    "profile_pr_fix_guidance",
+                    "profile",
+                    report.has_fix_guidance,
+                    "GitHub PR profile includes patch/fix direction.",
+                    "GitHub PR profile should explain the patch or smallest fix direction.",
+                ),
+            ]
+        )
+    elif profile == "internal-note":
+        checks.append(
+            _check(
+                "profile_internal_note",
+                "profile",
+                "warn" if not report.has_repro else "pass",
+                "Internal-note profile is allowed to capture rough triage, but missing repro remains non-fileable."
+                if not report.has_repro
+                else "Internal note already includes repro/proof indicators.",
+                blocking=False,
+            )
+        )
+    return checks
+
+
+def _apply_profile_blocking(checks: list[dict[str, str]], profile: str) -> list[dict[str, str]]:
+    if profile != "internal-note":
+        return checks
+    relaxed = []
+    for check in checks:
+        item = dict(check)
+        if item["id"] in {"repro", "attacker_path"} and item["status"] == "fail":
+            item["status"] = "warn"
+            item["blocking"] = "false"
+            item["detail"] += (
+                " Internal-note profile records this as triage debt instead of a filing blocker."
+            )
+        relaxed.append(item)
+    return relaxed
+
+
+def _has_duplicate_review_evidence(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?i)\b(duplicate|prior art|github search|issue search|pr search|advisory|ghsa|cve search|not a duplicate|non-duplicate)\b",
+            text,
+        )
+    )
 
 
 def _repo_grounding_check(
@@ -690,17 +954,25 @@ def _repo_grounding_check(
         status = "warn"
         detail = "No line-backed repo references were extracted from the report."
     evidence = ", ".join(f"{item['file']}:{item['line']}" for item in grounding_locations[:8])
-    return _check("repo_grounding", "repo_grounding", status, detail, blocking=True, evidence=evidence)
+    return _check(
+        "repo_grounding", "repo_grounding", status, detail, blocking=True, evidence=evidence
+    )
 
 
-def _attacker_path_check(report: ParsedReport, dangerous_hits: dict[str, list[str]]) -> dict[str, str]:
-    has_attacker_input = bool(report.attacker_mentions) and _has_attacker_controlled_input(report.text)
+def _attacker_path_check(
+    report: ParsedReport, dangerous_hits: dict[str, list[str]]
+) -> dict[str, str]:
+    has_attacker_input = bool(report.attacker_mentions) and _has_attacker_controlled_input(
+        report.text
+    )
     has_entrypoint = report.has_attack_surface or any(
         endpoint.split(maxsplit=1)[0] in {"GET", "POST", "PUT", "PATCH", "DELETE"}
         for endpoint in report.endpoints
         if " " in endpoint
     )
-    has_sink = bool(dangerous_hits) or any(term in report.text.lower() for term in RCE_TERMS + FILE_TERMS + SSRF_TERMS)
+    has_sink = bool(dangerous_hits) or any(
+        term in report.text.lower() for term in RCE_TERMS + FILE_TERMS + SSRF_TERMS
+    )
     has_source_to_sink = report.has_root_cause and report.has_exploit_chain
     missing_parts = []
     if not has_attacker_input:
@@ -742,9 +1014,7 @@ def _owasp_rationalization_check(
     non-blocking because final taxonomy choice is a human disclosure decision.
     """
     lower = report.text.lower()
-    capability_terms = " ".join(
-        term.lower() for terms in dangerous_hits.values() for term in terms
-    )
+    capability_terms = " ".join(term.lower() for terms in dangerous_hits.values() for term in terms)
     haystack = f"{lower} {capability_terms} {' '.join(report.impact_terms).lower()}"
     matches: list[str] = []
     for label, keywords in rules:
@@ -772,10 +1042,12 @@ def _owasp_detail_prefix(check_id: str) -> str:
 
 
 def _has_attacker_controlled_input(text: str) -> bool:
-    return bool(re.search(
-        r"(?i)\b(attacker[- ]controlled|user[- ]controlled|controls?|input|parameter|param|payload|prompt|url|request|body|header|file|workspace content)\b",
-        text,
-    ))
+    return bool(
+        re.search(
+            r"(?i)\b(attacker[- ]controlled|user[- ]controlled|controls?|input|parameter|param|payload|prompt|url|request|body|header|file|workspace content)\b",
+            text,
+        )
+    )
 
 
 def _check(
@@ -798,8 +1070,16 @@ def _check(
     }
 
 
-def _boolean_check(name: str, category: str, ok: bool, pass_detail: str, fail_detail: str) -> dict[str, str]:
-    return _check(name, category, "pass" if ok else "fail", pass_detail if ok else fail_detail, blocking=not ok)
+def _boolean_check(
+    name: str, category: str, ok: bool, pass_detail: str, fail_detail: str
+) -> dict[str, str]:
+    return _check(
+        name,
+        category,
+        "pass" if ok else "fail",
+        pass_detail if ok else fail_detail,
+        blocking=not ok,
+    )
 
 
 def _join_check_detail(items: list[str]) -> str:
@@ -822,7 +1102,19 @@ def duplicate_search(owner_repo: str | None, report: ParsedReport) -> list[str]:
     for term in terms:
         try:
             proc = subprocess.run(
-                ["gh", "search", "issues", term, "--repo", owner_repo, "--include-prs", "--limit", "5", "--json", "number,title,state,url"],
+                [
+                    "gh",
+                    "search",
+                    "issues",
+                    term,
+                    "--repo",
+                    owner_repo,
+                    "--include-prs",
+                    "--limit",
+                    "5",
+                    "--json",
+                    "number,title,state,url",
+                ],
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -832,25 +1124,68 @@ def duplicate_search(owner_repo: str | None, report: ParsedReport) -> list[str]:
             matches.append(f"GitHub duplicate search failed for `{term}`: {exc}")
             continue
         if proc.returncode != 0:
-            matches.append(f"GitHub duplicate search failed for `{term}`: {proc.stderr.strip()[:160]}")
+            matches.append(
+                f"GitHub duplicate search failed for `{term}`: {proc.stderr.strip()[:160]}"
+            )
             continue
         try:
             rows = json.loads(proc.stdout or "[]")
         except json.JSONDecodeError:
             rows = []
         for row in rows[:3]:
-            matches.append(f"Possible related item for `{term}`: #{row['number']} {row['title']} ({row['state']}) {row['url']}")
-    return _dedupe(matches) or ["No obvious GitHub issue/PR duplicates found from simple search terms."]
+            matches.append(
+                f"Possible related item for `{term}`: #{row['number']} {row['title']} ({row['state']}) {row['url']}"
+            )
+    return _dedupe(matches) or [
+        "No obvious GitHub issue/PR duplicates found from simple search terms."
+    ]
 
 
-def vet(repo: Path, report_path: Path, owner_repo: str | None = None) -> VetResult:
+def vet(
+    repo: Path, report_path: Path, owner_repo: str | None = None, profile: str = "preflight"
+) -> VetResult:
     report = parse_report(report_path)
-    confirmed, missing, evidence_locations, agent_context, dangerous_hits = collect_repo_evidence(repo, report)
+    confirmed, missing, evidence_locations, agent_context, dangerous_hits = collect_repo_evidence(
+        repo, report
+    )
     questions = generate_questions(report, agent_context, dangerous_hits)
     duplicates = duplicate_search(owner_repo, report)
-    verdict, reason, rewrite = decide_verdict(report, missing, agent_context)
-    checks = build_evidence_checklist(report, missing, agent_context, evidence_locations, dangerous_hits)
-    if duplicates and not duplicates[0].startswith("No obvious") and not duplicates[0].startswith("GitHub duplicate check skipped") and verdict == "PASS":
+    verdict, reason, rewrite = decide_verdict(report, missing, agent_context, profile)
+    checks = build_evidence_checklist(
+        report,
+        missing,
+        agent_context,
+        evidence_locations,
+        dangerous_hits,
+        profile,
+        duplicate_search_requested=bool(owner_repo),
+    )
+    blocking_failures = [
+        check
+        for check in checks
+        if check.get("blocking") == "true" and check.get("status") == "fail"
+    ]
+    internal_triage_debt = any(
+        check["id"] in {"repro", "attacker_path"}
+        and check.get("status") == "warn"
+        and "Internal-note profile records this as triage debt" in check.get("detail", "")
+        for check in checks
+    )
+    if profile == "internal-note" and internal_triage_debt and verdict == "PASS":
+        verdict = "NEEDS_WORK"
+        reason = "Internal-note profile can track triage debt, but missing repro or source-to-sink evidence is not fileable yet."
+        rewrite = "Keep as an internal note until a safe repro or code-path proof ties attacker input to impact."
+    elif blocking_failures and verdict == "PASS":
+        verdict = "NEEDS_WORK"
+        failed_ids = ", ".join(check["id"] for check in blocking_failures[:6])
+        reason = f"The report is grounded, but the `{profile}` profile still has blocking evidence gaps: {failed_ids}."
+        rewrite = "Address the blocking checklist rows before filing under this profile."
+    if (
+        duplicates
+        and not duplicates[0].startswith("No obvious")
+        and not duplicates[0].startswith("GitHub duplicate check skipped")
+        and verdict == "PASS"
+    ):
         verdict = "DUPLICATE_RISK"
         reason = "The finding looks grounded, but similar public GitHub items may already exist."
     return VetResult(
@@ -878,15 +1213,18 @@ def vet(repo: Path, report_path: Path, owner_repo: str | None = None) -> VetResu
             "has_exploit_chain": report.has_exploit_chain,
             "has_safe_side_effect": report.has_safe_side_effect,
             "has_fix_guidance": report.has_fix_guidance,
+            "profile": profile,
         },
     )
 
 
 def render_markdown(result: VetResult) -> str:
+    profile = result.parsed.get("profile", "preflight")
     lines = [
         "# Verifymate Result",
         "",
         f"Verdict: **{result.verdict}**",
+        f"Profile: `{profile}`",
         "",
         "## One-line reason",
         "",
@@ -895,7 +1233,11 @@ def render_markdown(result: VetResult) -> str:
         "## Checker result",
         "",
     ]
-    blocking_failures = [item for item in result.checks if item.get("blocking") == "true" and item["status"] == "fail"]
+    blocking_failures = [
+        item
+        for item in result.checks
+        if item.get("blocking") == "true" and item["status"] == "fail"
+    ]
     warnings = [item for item in result.checks if item["status"] == "warn"]
     lines += [
         f"- Blocking failures: {len(blocking_failures)}",
@@ -938,7 +1280,9 @@ def render_markdown(result: VetResult) -> str:
             for item in result.evidence_locations
         ]
     lines += ["", "## Missing or weak evidence", ""]
-    lines += _bullet_list(result.missing, empty="No obvious blockers found by the lightweight checks.")
+    lines += _bullet_list(
+        result.missing, empty="No obvious blockers found by the lightweight checks."
+    )
     lines += ["", "## Maintainer will ask", ""]
     lines += [f"{i}. {q}" for i, q in enumerate(result.questions, 1)]
     if result.duplicate_matches:
@@ -980,8 +1324,9 @@ def _search_literal(files: Iterable[Path], needle: str) -> bool:
     return False
 
 
-
-def _find_literal_location(files: Iterable[Path], needle: str, repo: Path, *, case_sensitive: bool = True) -> tuple[str, int, str] | None:
+def _find_literal_location(
+    files: Iterable[Path], needle: str, repo: Path, *, case_sensitive: bool = True
+) -> tuple[str, int, str] | None:
     if not needle:
         return None
     needle_cmp = needle if case_sensitive else needle.lower()
@@ -1017,6 +1362,7 @@ def _dedupe_locations(items: Iterable[dict[str, str]]) -> list[dict[str, str]]:
             out.append(item)
     return out[:40]
 
+
 def _dedupe(items: Iterable[str]) -> list[str]:
     seen = set()
     out = []
@@ -1028,7 +1374,12 @@ def _dedupe(items: Iterable[str]) -> list[str]:
 
 
 def _has_command(cmd: str) -> bool:
-    return subprocess.run(["/usr/bin/env", "sh", "-c", f"command -v {cmd} >/dev/null 2>&1"], timeout=5).returncode == 0
+    return (
+        subprocess.run(
+            ["/usr/bin/env", "sh", "-c", f"command -v {cmd} >/dev/null 2>&1"], timeout=5
+        ).returncode
+        == 0
+    )
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
