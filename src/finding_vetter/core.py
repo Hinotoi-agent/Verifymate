@@ -735,6 +735,7 @@ def build_evidence_checklist(
             else "Impact should name the affected asset, boundary, or capability.",
             blocking=False,
         ),
+        _severity_calibration_check(report, profile),
     ]
 
     # Compatibility row for consumers that already key on repo_refs.
@@ -943,6 +944,73 @@ def _has_duplicate_review_evidence(text: str) -> bool:
             r"(?i)\b(duplicate|prior art|github search|issue search|pr search|advisory|ghsa|cve search|not a duplicate|non-duplicate)\b",
             text,
         )
+    )
+
+
+def _severity_calibration_check(report: ParsedReport, profile: str) -> dict[str, str]:
+    """Flag maintainer-hostile severity framing that conflicts with the report's caveats.
+
+    Reviewer feedback on defense-in-depth PRs commonly pushes back when a report claims
+    High/Critical severity while also admitting that the input is platform metadata,
+    trusted upstream data, sanitized elsewhere, or has no demonstrated attacker control.
+    Keep that as an explicit checklist row so a PR body is calibrated before filing.
+    """
+    lower = report.text.lower()
+    severity = (report.severity or "").lower()
+    claims_high = severity in {"high", "critical"} or bool(
+        re.search(
+            r"(?i)\b(cvss\s*[:=]?\s*[7-9](?:\.\d+)?|severity\s*[:\-]\s*(?:high|critical))\b",
+            report.text,
+        )
+    )
+    if not claims_high:
+        return _check(
+            "severity_calibration",
+            "maintainer_readiness",
+            "pass",
+            "No High/Critical severity claim that needs exploitability calibration.",
+            blocking=False,
+        )
+
+    dampener_patterns = (
+        "defense-in-depth",
+        "defence-in-depth",
+        "hardening",
+        "low exploitability",
+        "theoretical",
+        "unlikely exploit",
+        "close to zero",
+        "not user-controlled",
+        "not attacker-controlled",
+        "server-side metadata",
+        "trusted upstream",
+        "platform metadata",
+        "sanitizes upload",
+        "sanitised upload",
+        "almost certainly sanitizes",
+        "almost certainly sanitises",
+        "no demonstrated exploit",
+        "not demonstrated",
+    )
+    matched = [term for term in dampener_patterns if term in lower]
+    if not matched:
+        return _check(
+            "severity_calibration",
+            "maintainer_readiness",
+            "pass",
+            "High/Critical severity claim has no obvious exploitability-dampening caveats in the report text.",
+            blocking=False,
+        )
+
+    blocking = profile in {"github-pr", "cve-request"}
+    return _check(
+        "severity_calibration",
+        "maintainer_readiness",
+        "fail" if blocking else "warn",
+        "High/Critical framing conflicts with exploitability caveats ("
+        + ", ".join(matched[:4])
+        + "). Reframe as defense-in-depth/hardening or add concrete attacker-control evidence before filing.",
+        blocking=blocking,
     )
 
 

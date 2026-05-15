@@ -444,6 +444,69 @@ def test_internal_note_profile_keeps_missing_source_to_sink_non_fileable(tmp_pat
     assert attacker_path["blocking"] == "false"
 
 
+def test_severity_calibration_blocks_high_defense_in_depth_github_pr(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "adapter.py").write_text(
+        "from pathlib import Path\n"
+        "def save(provider_filename):\n"
+        "    return Path('media') / provider_filename\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "finding.md"
+    report.write_text(
+        "# Path containment hardening\n\n"
+        "Severity: High\n\n"
+        "Affected files: `adapter.py`\n\n"
+        "Attack surface: provider media adapter.\n\n"
+        "Attacker: remote user may influence filenames, but here the value is server-side metadata and not user-controlled.\n\n"
+        "Root cause: source-to-sink path is provider filename -> media path write.\n\n"
+        "PoC: safe proof with expected result and cleanup.\n\n"
+        "Impact: path traversal if the upstream provider returned traversal names.\n\n"
+        "Fix: sanitize filename once at the unified write point. This is defense-in-depth hardening.\n",
+        encoding="utf-8",
+    )
+
+    result = vet(repo, report, profile="github-pr")
+
+    severity = next(check for check in result.checks if check["id"] == "severity_calibration")
+    assert result.verdict == "NEEDS_WORK"
+    assert severity["status"] == "fail"
+    assert severity["blocking"] == "true"
+    assert "defense-in-depth" in severity["detail"]
+    assert "not user-controlled" in severity["detail"]
+
+
+def test_severity_calibration_accepts_low_defense_in_depth_pr(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "adapter.py").write_text(
+        "from pathlib import Path\n"
+        "def save(provider_filename):\n"
+        "    return Path('media') / provider_filename\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "finding.md"
+    report.write_text(
+        "# Path containment hardening\n\n"
+        "Severity: Low\n\n"
+        "Affected files: `adapter.py`\n\n"
+        "Attack surface: provider media adapter.\n\n"
+        "Attacker: remote user may influence filenames only if upstream provider metadata is unsafe.\n\n"
+        "Root cause: source-to-sink path is provider filename -> media path write.\n\n"
+        "PoC: safe proof with expected result and cleanup.\n\n"
+        "Impact: defense-in-depth path containment.\n\n"
+        "Fix: sanitize filename once at the unified write point.\n",
+        encoding="utf-8",
+    )
+
+    result = vet(repo, report, profile="github-pr")
+
+    severity = next(check for check in result.checks if check["id"] == "severity_calibration")
+    assert severity["status"] == "pass"
+    assert severity["blocking"] == "false"
+
+
 def test_evidence_snippets_redact_secret_values(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
