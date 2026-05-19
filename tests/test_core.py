@@ -247,6 +247,79 @@ def test_attacker_path_check_passes_for_entrypoint_input_sink_chain(tmp_path: Pa
     )
 
 
+def test_source_to_sink_chain_check_requires_line_backed_source_and_sink(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "api.py").write_text(
+        "from flask import Flask, request\n"
+        "app = Flask(__name__)\n"
+        "@app.post('/api/run')\n"
+        "def run_command():\n"
+        "    import subprocess\n"
+        "    cmd = request.json['cmd']\n"
+        "    return subprocess.run(cmd, shell=True)\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "finding.md"
+    report.write_text(
+        "# Command execution\n\n"
+        "Severity: High\n\n"
+        "Affected files: `api.py`\n\n"
+        "Entrypoint: `POST /api/run`\n\n"
+        "Attacker: remote unauthenticated user controls the `cmd` parameter.\n\n"
+        "Root cause: source-to-sink path is `cmd` -> `subprocess.run`.\n\n"
+        "PoC: curl /api/run with expected result and cleanup.\n\n"
+        "Impact: remote command execution on the server.\n\n"
+        "Fix: validate input and avoid shell=True.\n",
+        encoding="utf-8",
+    )
+
+    result = vet(repo, report)
+
+    chain = next(check for check in result.checks if check["id"] == "source_to_sink_chain")
+    assert chain["status"] == "pass"
+    assert chain["blocking"] == "true"
+    assert "api.py:6" in chain["detail"]
+    assert "api.py:7" in chain["detail"]
+    assert any(item["kind"] == "source" and item["term"] == "cmd" for item in result.evidence_locations)
+    assert any(item["kind"] == "sink" and item["term"] == "subprocess.run" for item in result.evidence_locations)
+
+
+def test_source_to_sink_chain_fails_when_source_is_not_in_checkout(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "api.py").write_text(
+        "from flask import Flask\n"
+        "app = Flask(__name__)\n"
+        "@app.post('/api/run')\n"
+        "def run_command(command):\n"
+        "    import subprocess\n"
+        "    return subprocess.run(command, shell=True)\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "finding.md"
+    report.write_text(
+        "# Command execution\n\n"
+        "Severity: High\n\n"
+        "Affected files: `api.py`\n\n"
+        "Entrypoint: `POST /api/run`\n\n"
+        "Attacker: remote unauthenticated user controls the `cmd` parameter.\n\n"
+        "Root cause: source-to-sink path is `cmd` -> `subprocess.run`.\n\n"
+        "PoC: curl /api/run with expected result and cleanup.\n\n"
+        "Impact: remote command execution on the server.\n\n"
+        "Fix: validate input and avoid shell=True.\n",
+        encoding="utf-8",
+    )
+
+    result = vet(repo, report)
+
+    chain = next(check for check in result.checks if check["id"] == "source_to_sink_chain")
+    assert result.verdict == "NEEDS_WORK"
+    assert chain["status"] == "fail"
+    assert chain["blocking"] == "true"
+    assert "line-backed source" in chain["detail"]
+
+
 def test_owasp_rationalization_maps_web_and_llm_categories(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
