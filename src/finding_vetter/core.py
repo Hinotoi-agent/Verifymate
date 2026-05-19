@@ -47,6 +47,30 @@ RCE_TERMS = ["rce", "remote code", "command execution", "arbitrary command", "co
 FILE_TERMS = ["file read", "arbitrary file", "path traversal", "lfi", "directory traversal"]
 SSRF_TERMS = ["ssrf", "server-side request", "metadata", "internal network"]
 AUTH_TERMS = ["auth bypass", "authorization", "authentication", "idor", "privilege"]
+SOURCE_HINT_TERMS = (
+    "request",
+    "request.json",
+    "req.body",
+    "params",
+    "parameter",
+    "query",
+    "body",
+    "header",
+    "headers",
+    "payload",
+    "prompt",
+    "url",
+    "filename",
+    "file",
+    "path",
+    "input",
+    "user_input",
+    "cmd",
+    "command",
+)
+FLOW_LANGUAGE_RE = re.compile(
+    r"(?i)\b(source[- ]to[- ]sink|flows?\s+to|reaches?\s+(?:the\s+)?sink|passes?\s+to|propagat(?:e|es|ed)\s+to|->|→)\b"
+)
 VET_PROFILES = ("preflight", "cve-request", "github-pr", "internal-note")
 
 SENSITIVE_KEYWORDS = (
@@ -478,6 +502,15 @@ def collect_repo_evidence(
                 if hit:
                     evidence_locations.append(_evidence_location(category, term, *hit))
 
+    source_sink_locations = _collect_source_sink_locations(
+        all_text_files, report, repo, dangerous_hits
+    )
+    evidence_locations.extend(source_sink_locations)
+    if any(item["kind"] == "source" for item in source_sink_locations):
+        confirmed.append("Source-to-sink source term is line-backed in the current checkout.")
+    if any(item["kind"] == "sink" for item in source_sink_locations):
+        confirmed.append("Source-to-sink sink term is line-backed in the current checkout.")
+
     if report.has_repro:
         confirmed.append("Report appears to include a PoC/repro section or command.")
     else:
@@ -494,6 +527,73 @@ def collect_repo_evidence(
         _add_madbugs_style_evidence(report, confirmed, missing)
 
     return confirmed, missing, _dedupe_locations(evidence_locations), agent_context, dangerous_hits
+
+
+def _collect_source_sink_locations(
+    files: Iterable[Path],
+    report: ParsedReport,
+    repo: Path,
+    dangerous_hits: dict[str, list[str]],
+) -> list[dict[str, str]]:
+    """Find line-backed source and sink terms mentioned by a report's flow claim."""
+    if not (report.has_root_cause or report.has_exploit_chain or FLOW_LANGUAGE_RE.search(report.text)):
+        return []
+
+    locations: list[dict[str, str]] = []
+    source_terms = _extract_report_source_terms(report.text)
+    sink_terms = _extract_report_sink_terms(report.text, dangerous_hits)
+
+    for term in source_terms[:5]:
+        hit = _find_literal_location(files, term, repo, case_sensitive=False)
+        if hit:
+            locations.append(_evidence_location("source", term, *hit))
+            break
+    for term in sink_terms[:5]:
+        hit = _find_literal_location(files, term, repo, case_sensitive=False)
+        if hit:
+            locations.append(_evidence_location("sink", term, *hit))
+            break
+    return locations
+
+
+def _extract_report_source_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    code_terms = re.findall(r"`([^`]{1,80})`", text)
+    for term in code_terms:
+        cleaned = _clean_chain_term(term)
+        lower = cleaned.lower()
+        if any(hint in lower for hint in SOURCE_HINT_TERMS) or re.fullmatch(
+            r"[a-z_]*(?:cmd|command|prompt|url|path|file|filename|input|body|query|param)[a-z_]*",
+            lower,
+        ):
+            terms.append(cleaned)
+    lower_text = text.lower()
+    for hint in SOURCE_HINT_TERMS:
+        if hint in lower_text:
+            terms.append(hint)
+    return _dedupe(term for term in terms if term)
+
+
+def _extract_report_sink_terms(text: str, dangerous_hits: dict[str, list[str]]) -> list[str]:
+    terms: list[str] = []
+    lower_text = text.lower()
+    for term in re.findall(r"`([^`]{1,80})`", text):
+        cleaned = _clean_chain_term(term)
+        lower = cleaned.lower()
+        if any(keyword in lower for keyword in ("subprocess", "exec", "eval", "open", "read", "write", "fetch", "axios", "request")):
+            terms.append(cleaned)
+    for dangerous_terms in dangerous_hits.values():
+        for term in dangerous_terms:
+            if term.lower() in lower_text or term in {"subprocess", "shell=True", "open("}:
+                terms.append(term)
+    for term in RCE_TERMS + FILE_TERMS + SSRF_TERMS + AUTH_TERMS:
+        if term in lower_text:
+            terms.append(term)
+    return _dedupe(term for term in terms if term)
+
+
+def _clean_chain_term(term: str) -> str:
+    return term.strip().strip(".,:;()[]{}'\"")
 
 
 def _claims_high_impact_rce(report: ParsedReport) -> bool:
@@ -698,6 +798,7 @@ def build_evidence_checklist(
     checks: list[dict[str, str]] = [
         repo_grounding,
         attacker_path,
+        _source_to_sink_chain_check(report, evidence_locations, dangerous_hits),
         _owasp_rationalization_check(
             report, dangerous_hits, OWASP_TOP_10_RULES, "owasp_top_10", "owasp"
         ),
@@ -1041,6 +1142,58 @@ def _repo_grounding_check(
     evidence = ", ".join(f"{item['file']}:{item['line']}" for item in grounding_locations[:8])
     return _check(
         "repo_grounding", "repo_grounding", status, detail, blocking=True, evidence=evidence
+    )
+
+
+def _source_to_sink_chain_check(
+    report: ParsedReport,
+    evidence_locations: list[dict[str, str]],
+    dangerous_hits: dict[str, list[str]],
+) -> dict[str, str]:
+    source_locations = [item for item in evidence_locations if item["kind"] == "source"]
+    sink_locations = [item for item in evidence_locations if item["kind"] == "sink"]
+    sink_locations.extend(
+        item for item in evidence_locations if item["kind"] in DANGEROUS_TERMS
+    )
+    has_flow_language = bool(FLOW_LANGUAGE_RE.search(report.text)) or (
+        report.has_root_cause and report.has_exploit_chain
+    )
+    has_reported_source = bool(_extract_report_source_terms(report.text))
+    has_reported_sink = bool(_extract_report_sink_terms(report.text, dangerous_hits)) or bool(
+        dangerous_hits
+    )
+
+    missing_parts = []
+    if not has_flow_language:
+        missing_parts.append("flow language")
+    if not has_reported_source:
+        missing_parts.append("reported source")
+    elif not source_locations:
+        missing_parts.append("line-backed source")
+    if not has_reported_sink:
+        missing_parts.append("reported sink")
+    elif not sink_locations:
+        missing_parts.append("line-backed sink")
+
+    if not missing_parts:
+        source = source_locations[0]
+        sink = sink_locations[0]
+        return _check(
+            "source_to_sink_chain",
+            "attacker_path",
+            "pass",
+            "Source-to-sink chain has report flow language plus line-backed source "
+            f"and sink evidence: {source['file']}:{source['line']} -> {sink['file']}:{sink['line']}.",
+            blocking=True,
+            evidence=f"{source['file']}:{source['line']}, {sink['file']}:{sink['line']}",
+        )
+
+    return _check(
+        "source_to_sink_chain",
+        "attacker_path",
+        "fail",
+        "Missing source-to-sink evidence: " + ", ".join(missing_parts) + ".",
+        blocking=True,
     )
 
 
