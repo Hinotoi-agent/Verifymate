@@ -281,8 +281,13 @@ def test_source_to_sink_chain_check_requires_line_backed_source_and_sink(tmp_pat
     assert chain["blocking"] == "true"
     assert "api.py:6" in chain["detail"]
     assert "api.py:7" in chain["detail"]
-    assert any(item["kind"] == "source" and item["term"] == "cmd" for item in result.evidence_locations)
-    assert any(item["kind"] == "sink" and item["term"] == "subprocess.run" for item in result.evidence_locations)
+    assert any(
+        item["kind"] == "source" and item["term"] == "cmd" for item in result.evidence_locations
+    )
+    assert any(
+        item["kind"] == "sink" and item["term"] == "subprocess.run"
+        for item in result.evidence_locations
+    )
 
 
 def test_source_to_sink_chain_fails_when_source_is_not_in_checkout(tmp_path: Path):
@@ -627,3 +632,111 @@ def test_redact_sensitive_text_handles_common_secret_shapes():
     assert "app:secret" not in redacted
     assert "hunter2" not in redacted
     assert redacted.count("[REDACTED]") >= 4
+
+
+def test_destructive_action_safety_does_not_block_unrelated_cleanup_helpers(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "cache.py").write_text(
+        "def cleanup_cache():\n    return 'ok'\n\ndef delete_expired_session():\n    return 'ok'\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "finding.md"
+    report.write_text(
+        "# Authentication bypass\n\n"
+        "Affected files: `cache.py`\n\n"
+        "Attack surface: remote API.\n\n"
+        "Attacker: remote authenticated user controls request parameters.\n\n"
+        "Root cause: source-to-sink path is request -> auth bypass.\n\n"
+        "PoC: safe proof with expected result and cleanup.\n\n"
+        "Impact: authorization bypass.\n\n"
+        "Fix: require authorization checks.\n",
+        encoding="utf-8",
+    )
+
+    result = vet(repo, report, profile="github-pr")
+
+    safety = next(check for check in result.checks if check["id"] == "destructive_action_safety")
+    assert safety["status"] == "pass"
+    assert safety["blocking"] == "false"
+    assert "No destructive cleanup/reset/output-directory claim" in safety["detail"]
+
+
+def test_destructive_action_safety_blocks_missing_predelete_evidence(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "seed_corpus.py").write_text(
+        "from pathlib import Path\n"
+        "import shutil\n\n"
+        "def prepare(source_dir, output_path):\n"
+        "    shutil.rmtree(output_path, ignore_errors=True)\n"
+        "    Path(output_path).mkdir()\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "finding.md"
+    report.write_text(
+        "# Seed corpus output can delete project data\n\n"
+        "Severity: High\n\n"
+        "Affected files: `seed_corpus.py`\n\n"
+        "Attack surface: local operator runs the seed corpus helper against an untrusted project.\n\n"
+        "Attacker: local user controls the output path argument.\n\n"
+        "Root cause: source-to-sink path is `output_path` -> `shutil.rmtree`.\n\n"
+        "PoC: pytest reproduces deletion with expected result and cleanup.\n\n"
+        "Impact: destructive cleanup can delete operator project data.\n\n"
+        "Fix: sanitize path before cleanup.\n",
+        encoding="utf-8",
+    )
+
+    result = vet(repo, report, profile="github-pr")
+
+    safety = next(check for check in result.checks if check["id"] == "destructive_action_safety")
+    assert result.verdict == "NEEDS_WORK"
+    assert safety["status"] == "fail"
+    assert safety["blocking"] == "true"
+    assert "pre-side-effect validation" in safety["detail"]
+    assert "source/output path invariants" in safety["detail"]
+    assert "operator/project data is not deleted" in safety["detail"]
+    assert any("recursive delete" in question for question in result.questions)
+
+
+def test_destructive_action_safety_accepts_prevalidation_and_regressions(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "seed_corpus.py").write_text(
+        "from pathlib import Path\n"
+        "import shutil\n\n"
+        "def prepare(source_dir, output_path):\n"
+        "    validate_output_path(source_dir, output_path)\n"
+        "    shutil.rmtree(output_path, ignore_errors=True)\n"
+        "    Path(output_path).mkdir()\n\n"
+        "def validate_output_path(source_dir, output_path):\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "finding.md"
+    report.write_text(
+        "# Seed corpus output path safety\n\n"
+        "Severity: Medium\n\n"
+        "Affected files: `seed_corpus.py`\n\n"
+        "Attack surface: local operator runs the seed corpus helper against an untrusted project.\n\n"
+        "Attacker: local user controls the `output_path` parameter.\n\n"
+        "Root cause: source-to-sink path is `output_path` -> `shutil.rmtree`.\n\n"
+        "Validation happens before reset/delete cleanup side effects. The source input directory and output directory are both named. "
+        "The output directory must not equal the source, must not be an ancestor of source, and must not be filesystem root, user home directory, or repository root.\n\n"
+        "PoC: pytest regression test confirms unsafe output paths are rejected and existing operator project data is not deleted; "
+        "a positive unit test proves a valid dedicated project-local output directory inside the source still works. Expected result and cleanup are documented.\n\n"
+        "Impact: prevents destructive cleanup from deleting operator project data.\n\n"
+        "Fix: validate output path before cleanup and keep the valid dedicated output directory behavior.\n",
+        encoding="utf-8",
+    )
+
+    result = vet(repo, report, profile="github-pr")
+
+    safety = next(check for check in result.checks if check["id"] == "destructive_action_safety")
+    assert safety["status"] == "pass"
+    assert safety["blocking"] == "false"
+    assert "pre-side-effect validation" in safety["detail"]
+    assert "seed_corpus.py:6" in safety["evidence"]
+    markdown = render_markdown(result)
+    assert "### Operator safety" in markdown
+    assert "destructive_action_safety" in markdown

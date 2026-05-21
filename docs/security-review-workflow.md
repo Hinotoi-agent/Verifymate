@@ -50,6 +50,15 @@ Finding Title/
 └── repro-output.txt
 ```
 
+## Security-review checks
+
+Every security-review pass should treat operator-data safety as a first-class check when a draft involves cleanup, reset, archive extraction, generated artifacts, seed corpora, or output directories. Verifymate emits `destructive_action_safety` to require:
+
+- validation before destructive side effects such as recursive delete, reset, overwrite, or extraction;
+- source/input and output path invariants, including refusal of source-as-output, output ancestors, filesystem root, user home, and repository roots;
+- regression proof that unsafe paths are rejected without deleting existing operator/project data;
+- a positive regression that valid dedicated output directories still work when that behavior is part of the workflow.
+
 ## Gate interpretation
 
 - `PASS`: sufficient deterministic evidence for the selected profile. Still requires human review.

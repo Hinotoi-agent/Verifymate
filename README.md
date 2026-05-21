@@ -30,6 +30,7 @@ Verifymate acts like a checklist-driven review partner: it compares the report t
 - Referenced symbols, strings, and endpoints appear in the repo.
 - A structured `repo_grounding` gate summarizes whether repo references are line-backed by concrete file/line evidence.
 - A structured `attacker_path` gate checks for the minimum attacker-input → entrypoint → dangerous-sink → source-to-sink story before a finding is worth filing.
+- A structured `destructive_action_safety` gate checks cleanup/reset/output-directory findings for pre-side-effect path validation and non-deletion regression evidence.
 - The report includes an attacker model.
 - The report includes a PoC/repro indicator.
 - Dangerous capability terms exist in the repo.
@@ -95,6 +96,7 @@ JSON includes deterministic checker rows under `checks`. Each row has a stable `
 
 - `repo_grounding`: whether referenced files, symbols, endpoints, and dangerous capabilities are grounded in the checked-out repo.
 - `attacker_path`: whether the report connects attacker-controlled input, a reachable entrypoint, a dangerous sink, and a source-to-sink explanation.
+- `destructive_action_safety`: whether cleanup/reset/output-directory claims prove validation happens before destructive side effects and include regression evidence that unsafe paths do not delete existing operator/project data.
 
 Strict CI-friendly exit codes:
 
