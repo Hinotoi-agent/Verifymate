@@ -19,6 +19,18 @@ DANGEROUS_TERMS = {
         "ProcessBuilder",
     ],
     "file read/write": ["open(", "readFile", "writeFile", "send_file", "FileResponse", "Path("],
+    "destructive file operation": [
+        "shutil.rmtree",
+        "rmtree",
+        "Path.unlink",
+        "os.remove",
+        "os.unlink",
+        "remove_tree",
+        "remove_dir_all",
+        "rm -rf",
+        "rm -r",
+        "extractall",
+    ],
     "deserialization": ["pickle.load", "yaml.load", "loads(", "deserialize", "ObjectInputStream"],
     "ssrf/fetch": ["requests.get", "httpx.get", "fetch(", "axios", "urllib.request", "curl"],
     "plugin loading": ["importlib", "require(", "dlopen", "plugin", "extension", "load_module"],
@@ -70,6 +82,14 @@ SOURCE_HINT_TERMS = (
 )
 FLOW_LANGUAGE_RE = re.compile(
     r"(?i)\b(source[- ]to[- ]sink|flows?\s+to|reaches?\s+(?:the\s+)?sink|passes?\s+to|propagat(?:e|es|ed)\s+to|->|→)\b"
+)
+DESTRUCTIVE_ACTION_RE = re.compile(
+    r"(?ix)"
+    r"\b(?:shutil\.rmtree|rmtree|path\.unlink|os\.(?:remove|unlink)|remove_tree|remove_dir_all|extractall)\b"
+    r"|\brm\s+-r[f]?\b"
+    r"|\b(?:recursive\s+)?(?:delete|deletion|cleanup|clean\s+up|reset|overwrite|extract(?:ion)?)\b.{0,80}"
+    r"\b(?:path|dir|directory|file|tree|corpus|archive|output|artifact|project|workspace|repo|repository)\b"
+    r"|\b(?:seed\s+corpus|output\s+director(?:y|ies)|out_dir|generated\s+artifact(?:s)?|generated\s+director(?:y|ies))\b"
 )
 VET_PROFILES = ("preflight", "cve-request", "github-pr", "internal-note")
 
@@ -288,6 +308,11 @@ class ParsedReport:
     has_exploit_chain: bool = False
     has_safe_side_effect: bool = False
     has_fix_guidance: bool = False
+    has_destructive_action_scope: bool = False
+    has_destructive_prevalidation: bool = False
+    has_path_safety_invariants: bool = False
+    has_non_deletion_regression: bool = False
+    has_positive_output_regression: bool = False
 
 
 @dataclass
@@ -413,7 +438,139 @@ def parse_report(path: Path) -> ParsedReport:
             text,
         )
     )
+    report.has_destructive_action_scope = _mentions_destructive_action(text)
+    report.has_destructive_prevalidation = bool(
+        re.search(
+            r"(?is)\b(?:validate|validation|guard|reject|refuse|check|normalize|resolve|containment|allowlist|denylist)\b.{0,160}\b(?:before|pre[- ]?(?:reset|delete|deletion|cleanup|overwrite|extract|side[- ]effect)|prior to)\b|"
+            r"\b(?:before|pre[- ]?(?:reset|delete|deletion|cleanup|overwrite|extract|side[- ]effect)|prior to)\b.{0,160}\b(?:validate|validation|guard|reject|refuse|check|normalize|resolve|containment|allowlist|denylist)\b",
+            text,
+        )
+    )
+    report.has_path_safety_invariants = _has_path_safety_invariants(text)
+    report.has_non_deletion_regression = bool(
+        re.search(
+            r"(?is)\b(?:regression|test|pytest|unit test|assert)\b.{0,220}\b(?:not delete|does not delete|is not deleted|preserve|keeps existing|existing .* remains|refuses unsafe|rejects unsafe)\b|"
+            r"\b(?:not delete|does not delete|is not deleted|preserve|keeps existing|existing .* remains|refuses unsafe|rejects unsafe)\b.{0,220}\b(?:regression|test|pytest|unit test|assert)\b",
+            text,
+        )
+    )
+    report.has_positive_output_regression = bool(
+        re.search(
+            r"(?is)\b(?:regression|test|pytest|unit test|assert)\b.{0,220}\b(?:valid|dedicated|allowed|still works|positive|project-local|inside the source|inside source)\b|"
+            r"\b(?:valid|dedicated|allowed|still works|positive|project-local|inside the source|inside source)\b.{0,220}\b(?:regression|test|pytest|unit test|assert)\b",
+            text,
+        )
+    )
     return report
+
+
+def _mentions_destructive_action(text: str) -> bool:
+    return bool(DESTRUCTIVE_ACTION_RE.search(text))
+
+
+def _has_path_safety_invariants(text: str) -> bool:
+    lower = text.lower()
+    mentions_input = any(
+        term in lower for term in ("source", "input directory", "project dir", "project_dir")
+    )
+    mentions_output = any(
+        term in lower for term in ("out_dir", "output directory", "seed-out", "output path")
+    )
+    rejects_unsafe = any(
+        term in lower
+        for term in (
+            "must not equal",
+            "same as source",
+            "equals the source",
+            "ancestor",
+            "filesystem root",
+            "user home",
+            "home directory",
+            "repository root",
+            "repo root",
+        )
+    )
+    return mentions_input and mentions_output and rejects_unsafe
+
+
+def _destructive_action_needs_positive_regression(report: ParsedReport) -> bool:
+    lower = report.text.lower()
+    return any(
+        term in lower
+        for term in (
+            "seed corpus",
+            "output directory",
+            "out_dir",
+            "generated artifacts",
+            "generated directory",
+            "project-local",
+            "inside the source",
+            "inside source",
+        )
+    )
+
+
+def _destructive_action_safety_check(
+    report: ParsedReport,
+    evidence_locations: list[dict[str, str]],
+    dangerous_hits: dict[str, list[str]],
+) -> dict[str, str]:
+    # Keep this checklist report-scoped. Many repos contain benign cleanup/reset
+    # helpers, so a repo-wide destructive sink alone should not make unrelated
+    # findings non-fileable. The repo evidence is still cited when the report
+    # itself scopes a destructive/reset/output workflow.
+    applies = report.has_destructive_action_scope
+    evidence = ", ".join(
+        f"{item['file']}:{item['line']}"
+        for item in evidence_locations
+        if item["kind"] == "destructive file operation"
+    )
+    if not applies:
+        return _check(
+            "destructive_action_safety",
+            "operator_safety",
+            "pass",
+            "No destructive cleanup/reset/output-directory claim detected in the draft.",
+            blocking=False,
+        )
+
+    missing_parts: list[str] = []
+    if not report.has_destructive_action_scope:
+        missing_parts.append("reported destructive/reset/output action scope")
+    if not report.has_destructive_prevalidation:
+        missing_parts.append("pre-side-effect validation before delete/reset/overwrite/extract")
+    if not report.has_path_safety_invariants:
+        missing_parts.append("source/output path invariants and unsafe path refusals")
+    if not report.has_non_deletion_regression:
+        missing_parts.append("regression proof that existing operator/project data is not deleted")
+    if (
+        _destructive_action_needs_positive_regression(report)
+        and not report.has_positive_output_regression
+    ):
+        missing_parts.append(
+            "positive regression proving a valid dedicated output directory still works"
+        )
+
+    if missing_parts:
+        return _check(
+            "destructive_action_safety",
+            "operator_safety",
+            "fail",
+            "Destructive-action claims need stronger operator-data safety evidence: "
+            + ", ".join(missing_parts)
+            + ".",
+            blocking=True,
+            evidence=evidence,
+        )
+
+    return _check(
+        "destructive_action_safety",
+        "operator_safety",
+        "pass",
+        "Destructive/reset/output workflow evidence includes pre-side-effect validation, source/output path invariants, non-deletion regression coverage, and preserved valid output behavior where applicable.",
+        blocking=False,
+        evidence=evidence,
+    )
 
 
 def _extract_paths(text: str) -> list[str]:
@@ -536,7 +693,9 @@ def _collect_source_sink_locations(
     dangerous_hits: dict[str, list[str]],
 ) -> list[dict[str, str]]:
     """Find line-backed source and sink terms mentioned by a report's flow claim."""
-    if not (report.has_root_cause or report.has_exploit_chain or FLOW_LANGUAGE_RE.search(report.text)):
+    if not (
+        report.has_root_cause or report.has_exploit_chain or FLOW_LANGUAGE_RE.search(report.text)
+    ):
         return []
 
     locations: list[dict[str, str]] = []
@@ -580,7 +739,20 @@ def _extract_report_sink_terms(text: str, dangerous_hits: dict[str, list[str]]) 
     for term in re.findall(r"`([^`]{1,80})`", text):
         cleaned = _clean_chain_term(term)
         lower = cleaned.lower()
-        if any(keyword in lower for keyword in ("subprocess", "exec", "eval", "open", "read", "write", "fetch", "axios", "request")):
+        if any(
+            keyword in lower
+            for keyword in (
+                "subprocess",
+                "exec",
+                "eval",
+                "open",
+                "read",
+                "write",
+                "fetch",
+                "axios",
+                "request",
+            )
+        ):
             terms.append(cleaned)
     for dangerous_terms in dangerous_hits.values():
         for term in dangerous_terms:
@@ -675,6 +847,11 @@ def generate_questions(
             "Is file access intentionally workspace-scoped, and can the report prove escape via traversal or symlink?",
             "Can sensitive data be exfiltrated to an attacker-controlled channel?",
         ]
+    if _mentions_destructive_action(report.text) or "destructive file operation" in dangerous_hits:
+        questions += [
+            "Is path validation performed before any recursive delete, reset, overwrite, or extraction side effect?",
+            "Do tests prove unsafe output/source/root/home/repo paths are rejected without deleting existing operator data?",
+        ]
     if any(term in lower for term in SSRF_TERMS) or "ssrf/fetch" in dangerous_hits:
         questions += [
             "Can attacker-controlled URLs reach private IPs, redirects, DNS rebinding targets, or cloud metadata?",
@@ -687,7 +864,7 @@ def generate_questions(
     questions.append(
         "What would the maintainer say to dismiss this as intended, admin-only, duplicate, or out of scope?"
     )
-    return _dedupe(questions)[:10]
+    return _dedupe(questions)[:12]
 
 
 def decide_verdict(
@@ -799,6 +976,7 @@ def build_evidence_checklist(
         repo_grounding,
         attacker_path,
         _source_to_sink_chain_check(report, evidence_locations, dangerous_hits),
+        _destructive_action_safety_check(report, evidence_locations, dangerous_hits),
         _owasp_rationalization_check(
             report, dangerous_hits, OWASP_TOP_10_RULES, "owasp_top_10", "owasp"
         ),
@@ -1152,9 +1330,7 @@ def _source_to_sink_chain_check(
 ) -> dict[str, str]:
     source_locations = [item for item in evidence_locations if item["kind"] == "source"]
     sink_locations = [item for item in evidence_locations if item["kind"] == "sink"]
-    sink_locations.extend(
-        item for item in evidence_locations if item["kind"] in DANGEROUS_TERMS
-    )
+    sink_locations.extend(item for item in evidence_locations if item["kind"] in DANGEROUS_TERMS)
     has_flow_language = bool(FLOW_LANGUAGE_RE.search(report.text)) or (
         report.has_root_cause and report.has_exploit_chain
     )
@@ -1451,6 +1627,11 @@ def vet(
             "has_exploit_chain": report.has_exploit_chain,
             "has_safe_side_effect": report.has_safe_side_effect,
             "has_fix_guidance": report.has_fix_guidance,
+            "has_destructive_action_scope": report.has_destructive_action_scope,
+            "has_destructive_prevalidation": report.has_destructive_prevalidation,
+            "has_path_safety_invariants": report.has_path_safety_invariants,
+            "has_non_deletion_regression": report.has_non_deletion_regression,
+            "has_positive_output_regression": report.has_positive_output_regression,
             "profile": profile,
         },
     )
@@ -1494,6 +1675,12 @@ def render_markdown(result: VetResult) -> str:
         for item in result.checks
         if item.get("category") == "attacker_path"
     ] or ["- No attacker-path checks generated."]
+    lines += ["", "### Operator safety"]
+    lines += [
+        f"- **{item['status'].upper()}** `{item['id']}` — {item['detail']}"
+        for item in result.checks
+        if item.get("category") == "operator_safety"
+    ] or ["- No operator-safety checks generated."]
     lines += ["", "### OWASP rationalization"]
     lines += [
         f"- **{item['status'].upper()}** `{item['id']}` — {item['detail']}"
